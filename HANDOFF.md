@@ -58,15 +58,20 @@ cp .env.example .env
 | 기획 | 계획서 v2.1 (페르소나 3인 전원 컨펌) | ✅ |
 | 기획 | 문서 세트: RFP·use-flow·wireframes·data-flow·architecture·resources·poc-plan·error-handling·ADR 0001~0006 | ✅ |
 | 기획 | **문서 세트 페르소나 검토–수정–컨펌 루프 (영상전문가·PM·덕후 3인 전원 컨펌)** | ✅ |
+| PoC | **`feature/poc-core` H1~H4 코드 검증 (조건부 Go)** — 상세 `poc/REPORT.md` | ✅ |
 
 ### 🔴 블로커
-없음
+- **GPU(CUDA) 사실상 필수**: PoC 실측상 SAM2 추적이 **CPU 에서 ≈0.10 fps**(프레임당 ~10초, 6초 클립에 ~14분). 현재 개발 PC 는 CPU 전용 → **실영상 추적·재추적 검증과 실사용에 GPU 환경 필요**. 하드웨어/클라우드 방향 결정 대기.
 
 ### 미완료 (다음 작업 순서) ⏳
-1. **PoC**: `feature/poc-core` 브랜치 분기 → `docs/poc-plan.md` H1~H4 코드 검증 (SAM2 설치/추적, 컷 재추적, CPU, 오디오 동기). PoC 산출물은 `poc/` 폴더, 테스트 영상은 `test-data/`(gitignore, 경로·스펙만 poc-plan 에 기록).
-2. **라이선스 확정**: Real-ESRGAN/basicsr/FFmpeg 빌드 → `docs/resources.md` §2 결과 기록.
-3. PoC 통과(Go/No-Go) → 스캐폴딩 → `feature/{도메인}/{기능}` 브랜치에서 `/develop` 으로 MVP 구현.
-4. (선택) 원격 저장소 연결 후 푸시(현재 remote 미설정).
+1. **하드웨어 방향 결정**: GPU PC / 클라우드 GPU(Colab·런팟 등) 확보 여부.
+2. **실영상 검증(GPU)**: 짧은 군무 MV 클립으로 H1 추적 유지율(AC-01 ≥80%)·H2 컷 재매칭(AC-03 ≥70%, Grounding DINO 포함) 측정. → `poc/REPORT.md` 미검증 항목.
+3. **라이선스 확정**: Real-ESRGAN/basicsr/FFmpeg 빌드 → `docs/resources.md` §2 결과 기록.
+4. 검증 통과 → 스캐폴딩 → `feature/{도메인}/{기능}` 브랜치에서 `/develop` 으로 MVP 구현(**GPU 전제**, CPU 는 단발/초단편 보조).
+
+### PoC 핵심 결과 (요약)
+- SAM2(이미지+비디오)·Grounding DINO 는 **transformers 5.9.0 만으로** 사용 가능(별도 `sam2` 패키지 불필요).
+- 추적 정확성 OK(합성 100%), 컷 감지·오디오 동기 OK. **병목은 오직 SAM2 추론(GPU 필요)**.
 
 ### Git / 분기 전략
 - 기본: GitHub Flow. `main` 항상 배포(여기선 "문서 일관") 가능 상태 유지.

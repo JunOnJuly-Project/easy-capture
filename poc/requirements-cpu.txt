@@ -1,0 +1,18 @@
+# easy-capture PoC 의존성 (CPU 환경)
+# 설치: python -m venv .venv && .venv\Scripts\pip install -r poc/requirements-cpu.txt
+# 주의: Windows 에서 'torch' 는 기본 CPU 빌드가 설치된다(CUDA 별도 인덱스 불필요).
+
+torch
+torchvision
+transformers>=4.55        # SAM2 / Grounding DINO 통합 (2025-08+)
+accelerate
+
+scenedetect[opencv]        # 샷 경계 감지 (H2)
+av                         # PyAV: 정확한 PTS/VFR 디코드 (H4)
+opencv-python
+pillow
+numpy
+imageio
+imageio-ffmpeg             # 합성 클립/MP4 인코딩, ffmpeg 번들
+
+# 업스케일(Real-ESRGAN)·standalone sam2 패키지는 H1~H4 이후 별도 검증

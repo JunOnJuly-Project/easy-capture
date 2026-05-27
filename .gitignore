@@ -24,9 +24,11 @@ clips/
 *.gif
 *.mp4
 
-# PoC 테스트 영상 / 스크래치 (경로·스펙은 docs/poc-plan.md 에 기록)
+# PoC 테스트 영상 / 스크래치 / 로그 (경로·스펙은 docs/poc-plan.md 에 기록)
 test-data/
 poc/scratch/
+poc/*.log
+poc/*.noaudio.mp4
 
 # OS / IDE
 .DS_Store
