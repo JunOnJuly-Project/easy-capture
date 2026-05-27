@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# 환경
+.env
+
+# 모델 가중치 / 캐시 (저장소에 커밋 금지)
+models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+.cache/
+
+# 출력물 / 작업 산출
+output/
+clips/
+*.gif
+*.mp4
+
+# PoC 테스트 영상 / 스크래치 (경로·스펙은 docs/poc-plan.md 에 기록)
+test-data/
+poc/scratch/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
