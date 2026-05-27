@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "easy-capture"
+version = "0.1.0"
+description = "동영상에서 오브젝트를 추적해 중심 크롭으로 짤/움짤을 만드는 로컬 데스크톱 앱"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6",
+    "torch",
+    "torchvision",
+    "transformers>=4.55",
+    "scenedetect[opencv]",
+    "av",
+    "imageio",
+    "imageio-ffmpeg",
+    "pillow",
+    "numpy",
+    "opencv-python",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+easy-capture = "easy_capture.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
