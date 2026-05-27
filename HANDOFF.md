@@ -65,7 +65,7 @@ cp .env.example .env
 
 ### 미완료 (다음 작업 순서) ⏳
 1. **하드웨어 방향 결정**: GPU PC / 클라우드 GPU(Colab·런팟 등) 확보 여부.
-2. **실영상 검증(GPU)**: 짧은 군무 MV 클립으로 H1 추적 유지율(AC-01 ≥80%)·H2 컷 재매칭(AC-03 ≥70%, Grounding DINO 포함) 측정. → `poc/REPORT.md` 미검증 항목.
+2. **실영상 검증(GPU)**: `poc/colab/easy_capture_gpu_poc.ipynb` 를 Colab(GPU) 에서 실행, 짧은 군무 MV 클립으로 H1 추적 유지율(AC-01 ≥80%)·H2 컷 재매칭(AC-03 ≥70%, Grounding DINO 포함)·GPU fps(AC-06) 측정 → `poc/REPORT.md` 미검증 항목 채우기. (사용법: `poc/colab/README.md`)
 3. **라이선스 확정**: Real-ESRGAN/basicsr/FFmpeg 빌드 → `docs/resources.md` §2 결과 기록.
 4. 검증 통과 → 스캐폴딩 → `feature/{도메인}/{기능}` 브랜치에서 `/develop` 으로 MVP 구현(**GPU 전제**, CPU 는 단발/초단편 보조).
 
