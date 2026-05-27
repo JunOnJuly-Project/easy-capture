@@ -22,25 +22,30 @@
 
 ---
 
-## 2. 라이선스 종합표 (상업 사용 안전성)
+## 2. 라이선스 종합표 (상업 사용 안전성) — 공식 repo 확인 2026-05-27
 
-| 구성요소 | 라이선스 | 상업 사용 | 비고 |
+| 구성요소 | 라이선스 | 상업 사용 | 근거 / 비고 |
 |---|---|---|---|
-| SAM 2.1 | Apache 2.0 | ✅ | — |
-| Grounding DINO | Apache 2.0 | ✅ | — |
+| SAM 2.1 (코드+가중치) | Apache 2.0 | ✅ | 공식 facebookresearch/sam2 |
+| Grounding DINO | Apache 2.0 | ✅ | IDEA-Research |
 | PySceneDetect | BSD-3-Clause | ✅ | — |
-| Real-ESRGAN (코드) | BSD-3-Clause | ✅(검증 필요 ※) | 사전학습 가중치 출처별 조건 재확인 |
-| **basicsr** (Real-ESRGAN 의존) | Apache 2.0 | ✅(검증 필요 ※) | Real-ESRGAN 의 필수 의존성 |
-| SwinIR / Swin2SR | Apache 2.0 | ✅ | transformers 내장 |
+| **SwinIR / Swin2SR** (코드) | Apache 2.0 | ✅ | **기본 업스케일러로 채택** |
+| Real-ESRGAN (코드) | BSD-3-Clause | ✅ | — |
+| **Real-ESRGAN 가중치** | BSD-3, 단 **DIV2K(학술 전용) 학습** | ⚠ | 상업 배포 시 데이터 계보 리스크 → 기본 비활성·옵션 시 경고 |
+| basicsr (Real-ESRGAN 의존) | Apache 2.0 | ✅ | XPixelGroup/BasicSR |
 | PyAV | BSD-3-Clause | ✅ | FFmpeg 바인딩 |
-| FFmpeg (런타임) | LGPL/GPL 빌드별 | ⚠ | LGPL 빌드 사용 권장, GPL 코덱 포함 빌드 주의 |
-| imageio / imageio-ffmpeg | BSD-2 | ✅ | — |
-| Pillow | HPND(MIT 계열) | ✅ | — |
-| PySide6 | LGPLv3 | ✅ | 동적 링크 시 LGPL 준수 |
+| imageio / imageio-ffmpeg | BSD-2 | ✅ | 래퍼 |
+| **FFmpeg (LGPL 빌드)** | LGPL 2.1+ | ✅ | 동적 링크 + 소스 고지 |
+| **libx264 (H.264 인코더)** | **GPL** | ⚠ | **GPL 코덱** → 상업 배포 시 앱 전체 GPL 강제. 개인/로컬 사용은 무방 |
+| Pillow / numpy | HPND / BSD | ✅ | — |
 | torch / transformers | BSD / Apache 2.0 | ✅ | — |
+| PySide6 | LGPLv3 | ✅ | 동적 링크 시 준수 |
 
-> **※ 검증 필요 항목 (배포 전 확정, 본 표에 결과 기록)**: ① Real-ESRGAN 코드/가중치 라이선스를 공식 repo `LICENSE` 로 확정(웹 자료 간 BSD vs 비상업 혼동 존재). ② basicsr 라이선스·버전. ③ 배포할 FFmpeg 빌드(LGPL vs GPL) 및 포함 코덱.
-> 결론(현 시점 판단): SAM2·DINO·SwinIR·PySceneDetect·PyAV 경로는 상업 안전. Real-ESRGAN 은 옵션 기능이므로, 라이선스 재확인 전에는 **SwinIR 을 기본 업스케일러**로 두고 Real-ESRGAN 을 사용자 선택으로 제공.
+### 결론 / 정책 (확정)
+- **기본 업스케일러 = SwinIR/Swin2SR(Apache 2.0)**. Real-ESRGAN 은 옵션으로만, 가중치가 DIV2K(학술 전용) 학습이라 **상업 배포 시 기본 비활성 + 경고**.
+- **인코딩**: 개인·로컬 사용은 libx264(H.264, 최고 호환성)를 기본으로 둔다. **상업 배포 시에는** ① x264 상용 라이선스 구매 또는 ② libx264 회피(VP9 등) + H.264/HEVC 특허(MPEG-LA/HEVC Advance) 별도 검토 — **상업화 결정 시 법무 재검토 항목**.
+- **데이터 계보 주의**: 학술 전용 데이터(DIV2K)로 학습한 SR 가중치의 상업 사용 가부는 법적으로 **미확정 영역**이며 대부분의 SR 모델이 해당된다. SwinIR 은 코드가 Apache 2.0 으로 더 투명해 **상대적 저위험**으로 채택하되, 완전한 상업 안전이 필요하면 상업 라이선스 데이터로 재학습/대체가 필요하다.
+- 상업 안전 경로(코드·가중치 모두): SAM2 · Grounding DINO · SwinIR · PySceneDetect · PyAV · PySide6.
 
 ---
 

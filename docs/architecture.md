@@ -57,11 +57,14 @@
 class Detector(Protocol):              # Grounding DINO 등 교체 가능
     def detect(self, frame, prompt: str) -> list[Detection]: ...
 
-class VideoSegmenter(Protocol):        # SAM2 video predictor
-    def init_object(self, frame, prompt) -> ObjectId: ...
-    def propagate(self, frames) -> Iterator[FrameMask]: ...
+class SegmentationBackend(Protocol):   # SAM2 / 경량모델(이미지 전용) 교체 (ADR 0007)
+    device: str
+    def segment_image(self, frame, points=None, boxes=None) -> Mask: ...
+    def supports_video(self) -> bool: ...          # 경량 백엔드는 False
+    def init_video_session(self, frames): ...      # SAM2 등 비디오 지원 시
+    def propagate(self, session) -> Iterator[FrameMask]: ...
 
-class Upscaler(Protocol):              # Real-ESRGAN / SwinIR 공통
+class Upscaler(Protocol):              # SwinIR(기본) / Real-ESRGAN(옵션) 공통
     def upscale(self, image, scale: int) -> Image: ...
 
 class VideoReader(Protocol):           # PyAV / decord 교체 가능
@@ -69,7 +72,7 @@ class VideoReader(Protocol):           # PyAV / decord 교체 가능
     def read_range(self, start, end) -> Iterator[Frame]: ...
 ```
 
-> SAM2 티어(tiny~large), 검출기, 업스케일러는 모두 인터페이스로 추상화 → 디바이스/품질에 따라 런타임 선택.
+> 검출기·세그멘테이션 백엔드·업스케일러는 인터페이스로 추상화 → **디바이스(CPU/GPU)·모드(이미지/비디오)** 에 따라 런타임 선택([ADR 0007](adr/0007-cpu-dev-strategy.md)). 이미지 모드는 CPU 백엔드 허용, 비디오 추적은 GPU 백엔드(SAM2). 업스케일 기본 = SwinIR.
 
 ---
 

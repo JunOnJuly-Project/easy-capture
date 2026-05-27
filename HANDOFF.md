@@ -59,6 +59,8 @@ cp .env.example .env
 | 기획 | 문서 세트: RFP·use-flow·wireframes·data-flow·architecture·resources·poc-plan·error-handling·ADR 0001~0006 | ✅ |
 | 기획 | **문서 세트 페르소나 검토–수정–컨펌 루프 (영상전문가·PM·덕후 3인 전원 컨펌)** | ✅ |
 | PoC | **`feature/poc-core` H1~H4 코드 검증 (조건부 Go)** — 상세 `poc/REPORT.md` | ✅ |
+| 조사 | **라이선스 확정**(resources.md §2): 기본 업스케일러=SwinIR, Real-ESRGAN 가중치 DIV2K 리스크, libx264=GPL(상업 시 주의) | ✅ |
+| 조사 | **CPU 개발 전략 확정**(ADR 0007): 이중 경로 — 이미지=CPU, 비디오=클라우드 GPU | ✅ |
 
 ### 🔴 블로커
 - **GPU(CUDA) 사실상 필수**: PoC 실측상 SAM2 추적이 **CPU 에서 ≈0.10 fps**(프레임당 ~10초, 6초 클립에 ~14분). 현재 개발 PC 는 CPU 전용 → **실영상 추적·재추적 검증과 실사용에 GPU 환경 필요**. 하드웨어/클라우드 방향 결정 대기.
@@ -66,8 +68,7 @@ cp .env.example .env
 ### 미완료 (다음 작업 순서) ⏳
 1. **하드웨어 방향 결정**: GPU PC / 클라우드 GPU(Colab·런팟 등) 확보 여부.
 2. **실영상 검증(GPU)**: `poc/colab/easy_capture_gpu_poc.ipynb` 를 Colab(GPU) 에서 실행, 짧은 군무 MV 클립으로 H1 추적 유지율(AC-01 ≥80%)·H2 컷 재매칭(AC-03 ≥70%, Grounding DINO 포함)·GPU fps(AC-06) 측정 → `poc/REPORT.md` 미검증 항목 채우기. (사용법: `poc/colab/README.md`)
-3. **라이선스 확정**: Real-ESRGAN/basicsr/FFmpeg 빌드 → `docs/resources.md` §2 결과 기록.
-4. 검증 통과 → 스캐폴딩 → `feature/{도메인}/{기능}` 브랜치에서 `/develop` 으로 MVP 구현(**GPU 전제**, CPU 는 단발/초단편 보조).
+3. 검증 통과 → 스캐폴딩 → `feature/{도메인}/{기능}` 브랜치에서 `/develop` 으로 MVP 구현. **이중 경로**(ADR 0007): 이미지 모드+UI 는 CPU 로컬, 비디오 모드는 클라우드 GPU 검증. 업스케일 기본 SwinIR.
 
 ### PoC 핵심 결과 (요약)
 - SAM2(이미지+비디오)·Grounding DINO 는 **transformers 5.9.0 만으로** 사용 가능(별도 `sam2` 패키지 불필요).
@@ -78,9 +79,9 @@ cp .env.example .env
 - 문서 단계: `main` 직접 커밋 허용(초기). PoC/구현부터 feature 브랜치.
 
 ### 알려진 미해결 이슈 / 주의사항
-- [ ] Real-ESRGAN/basicsr 상업 라이선스 공식 확정 전: SwinIR 을 기본 업스케일러로 사용
-- [ ] SAM2 컷 재추적(ADR 0006) 현실성은 PoC H2 가 최대 리스크
-- [ ] 모델 repo id·크기·라이선스는 구현 전 HF/GitHub 로 1회 대조
+- [x] 라이선스 확정 완료 → **기본 업스케일러 SwinIR**. Real-ESRGAN 은 옵션(상업 배포 시 비활성). **libx264=GPL** → 상업 배포 시 코덱/라이선스 법무 재검토.
+- [ ] SAM2 컷 재추적(ADR 0006) 현실성은 PoC H2(실영상·GPU) 가 최대 리스크 — 미검증
+- [ ] EdgeTAM(CPU 비디오 추적 후보)·경량 백엔드는 v1.1 평가
 
 ---
 
