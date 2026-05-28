@@ -7,6 +7,10 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
 ## [미출시]
 
 ### 추가
+- **비디오 occlusion gap 정책 UI** (`feature/video/gap-policy-ui`)
+  - 추적이 끊긴(occlusion) 프레임 처리 정책을 UI에서 선택: 배경 유지(BACKGROUND)/컷(CUT)/정지(FREEZE).
+  - `ui/video_window` 갭 콤보 + export 시 `VideoExportConfig.gap_policy` 전달. 백엔드 `build_output_indices`는 기존 재사용(UI가 선택값만 노출).
+  - 테스트 284개 통과(`_GAP_POLICY_ITEMS` 매핑 가드, 기본 BACKGROUND 무회귀). gap_policy는 순수 로직이라 CPU 검증 완료.
 - **비디오 샷경계 재추적 — 컷 넘어 동일 인물 자동 재추적** (`feature/video/shot-retrack`, ADR 0006)
   - `core/crop.bbox_of_mask`(마스크→bbox), `core/tracking`: `select_best_match`·`RematchResult`·`REMATCH_THRESHOLD=0.5`·`split_into_shots` 순수 함수.
   - `core/segmentation/detection_backend`: `Detection`·`DetectionBackend` Protocol(stateless, ADR 0012).
