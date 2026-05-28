@@ -1,15 +1,19 @@
 """테스트 더블(가짜 의존성) 구현.
 
-FakeBackend   — SegmentationBackend Protocol 준수. torch/transformers 비의존.
-FakeFrameSource — FrameSource Protocol 준수. PyAV/ffprobe 비의존.
+FakeBackend         — SegmentationBackend Protocol 준수. torch/transformers 비의존.
+FakeFrameSource     — FrameSource Protocol 준수. PyAV/ffprobe 비의존.
+FakeUpscaleBackend  — UpscaleBackend Protocol 준수. torch/transformers 비의존.
 
-두 클래스 모두 결정적(deterministic) 출력을 보장해 단위 테스트에서
-예측 가능한 centroid·마스크를 계산할 수 있게 한다.
+모든 클래스는 결정적(deterministic) 출력을 보장해 단위 테스트에서
+예측 가능한 결과를 계산할 수 있게 한다.
 
 변경 이력:
   - segment_call_count: segment_image 호출 횟수 카운터 추가 (crop-ux 슬라이스).
     WHY: compute_box 반복 호출 시 세그가 재실행되지 않는다는 핵심 회귀 가드를
          FakeBackend 단독으로 검증할 수 있게 한다.
+  - FakeUpscaleBackend: UpscaleBackend Protocol 준수, upscale_call_count 스파이 추가
+    (image-upscale 슬라이스). WHY: export가 업스케일을 정확히 필요한 만큼만
+    호출하는지 단언하기 위해. torch/transformers 비의존, nearest 확대로 결정적 출력.
 """
 from __future__ import annotations
 
@@ -19,6 +23,16 @@ import numpy as np
 from easy_capture.core.segmentation.backend import SegmentationBackend  # noqa: F401
 
 from easy_capture.infra.video_io import FrameMeta, FrameSource  # noqa: F401
+
+# --- UpscaleBackend: 구현 전이므로 import 실패가 예상 RED 상태 ---
+# WHY: try/except로 감싸는 이유 — core/upscale 패키지가 아직 없을 때
+#      fakes.py import 자체가 실패해 기존 137개 테스트까지 차단되는 것을 방지한다.
+#      UpscaleBackend가 없으면 FakeUpscaleBackend의 isinstance 검사 테스트만 실패하고
+#      나머지 기존 테스트는 정상 통과한다.
+try:
+    from easy_capture.core.upscale.backend import UpscaleBackend  # noqa: F401
+except ModuleNotFoundError:
+    UpscaleBackend = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
 # 결정적 마스크 생성 헬퍼 상수
@@ -165,3 +179,55 @@ class FakeFrameSource:
         # B채널: 고정값 128
         frame[:, :, 2] = 128
         return frame
+
+
+# ---------------------------------------------------------------------------
+# FakeUpscaleBackend
+# ---------------------------------------------------------------------------
+# nearest 확대 방식 상수
+# WHY: np.repeat(np.repeat(..., scale, axis=0), scale, axis=1) 방식으로
+#      torch 없이 scale배 nearest 확대를 구현한다. 결과가 결정적이어서
+#      저장 이미지의 크기를 정확히 예측해 단언할 수 있다.
+_UPSCALE_CHANNELS = 3
+
+
+class FakeUpscaleBackend:
+    """UpscaleBackend Protocol을 준수하는 테스트 더블.
+
+    torch·transformers·PySide6를 전혀 import하지 않는다.
+    upscale은 numpy np.repeat 기반 nearest 확대로 결정적 출력을 반환한다.
+    결과 shape: (H*scale, W*scale, 3), dtype uint8.
+
+    속성:
+        upscale_call_count: upscale 호출 횟수 스파이 카운터.
+            WHY: export가 업스케일을 정확히 필요한 만큼만(선택 시 1회,
+                 미선택 시 0회) 호출한다는 핵심 회귀 가드를 단언하기 위해.
+                 FakeBackend.segment_call_count 패턴을 그대로 적용한다.
+    """
+
+    def __init__(self, device: str = "cpu", scale: int = 2) -> None:
+        """device·scale 속성 보관 (UpscaleBackend Protocol 요구사항).
+
+        scale: 고정 배율(2 또는 4). 테스트에서 원하는 배율을 주입한다.
+        """
+        self.device = device
+        self.scale = scale
+        # 호출 횟수 카운터 — 초기값 0, upscale 호출마다 +1
+        self.upscale_call_count: int = 0
+
+    def upscale(self, image_rgb: np.ndarray) -> np.ndarray:
+        """RGB HxWx3 uint8 → (H*scale, W*scale, 3) uint8 nearest 확대.
+
+        Given: RGB HxWx3 uint8 배열
+        When:  upscale 호출
+        Then:  (H*scale, W*scale, 3) uint8, 호출 횟수 카운터 +1
+
+        WHY: np.repeat으로 nearest 확대해 torch 비의존으로 결정적 출력을 보장한다.
+             저장 이미지 크기를 테스트에서 scale배로 정확히 예측할 수 있게 한다.
+        """
+        # WHY: 카운터를 먼저 증가시켜야 조기 반환이 있어도 카운트된다.
+        self.upscale_call_count += 1
+        # H축 repeat → W축 repeat 순서로 nearest 확대
+        enlarged = np.repeat(image_rgb, self.scale, axis=0)
+        enlarged = np.repeat(enlarged, self.scale, axis=1)
+        return enlarged.astype(np.uint8)

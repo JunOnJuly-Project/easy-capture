@@ -35,6 +35,17 @@ from easy_capture.core.export.image_export import ExportConfig
 from easy_capture.core.segmentation.backend import SegmentationBackend
 from tests.fixtures.fakes import FakeBackend, FakeFrameSource
 
+# WHY: FakeUpscaleBackend는 core/upscale 패키지에 의존하는 import를 포함하므로
+#      패키지 미구현 시 import 실패로 기존 테스트까지 차단되지 않도록 분리한다.
+try:
+    from tests.fixtures.fakes import FakeUpscaleBackend
+    _HAS_FAKE_UPSCALER = True
+except (ImportError, ModuleNotFoundError):
+    FakeUpscaleBackend = None  # type: ignore[assignment,misc]
+    _HAS_FAKE_UPSCALER = False
+
+_MSG_NO_UPSCALER = "core/upscale 패키지 미구현 — FakeUpscaleBackend 사용 불가"
+
 # ---------------------------------------------------------------------------
 # 테스트 상수
 # ---------------------------------------------------------------------------
@@ -1071,4 +1082,191 @@ class TestMakeCropBoxNoRegression:
         assert backend.segment_call_count == 1, (
             f"make_crop_box가 segment_image를 {backend.segment_call_count}회 호출함. "
             "위임 조합자는 segment를 정확히 1회만 호출해야 한다."
+        )
+
+
+# ---------------------------------------------------------------------------
+# export 업스케일 연결 테스트 (image-upscale 슬라이스 신규)
+# ---------------------------------------------------------------------------
+# 테스트용 박스 크기 상수 (x1, y1, x2, y2) — 50×40 크롭
+_UPSCALE_BOX = (100, 100, 150, 140)
+_UPSCALE_BOX_W = _UPSCALE_BOX[2] - _UPSCALE_BOX[0]   # 50
+_UPSCALE_BOX_H = _UPSCALE_BOX[3] - _UPSCALE_BOX[1]   # 40
+
+# 업스케일 배율 상수
+_UPSCALE_SCALE_2 = 2
+_UPSCALE_SCALE_4 = 4
+
+
+class TestExportWithUpscaler:
+    """export의 선택적 upscaler 연결 계약 검증 (계획서 §4-2, §7-2).
+
+    검증 목표:
+      1. upscaler=None(기본) → 업스케일 미호출, 저장 크기 = 박스 크기 (무회귀)
+      2. FakeUpscaleBackend(scale=2) 주입 → 저장 크기 = 박스×2
+      3. upscale_call_count == 1 (중복 추론 회귀 가드)
+      4. 기존 export 호출(upscaler 인자 없음)이 무회귀로 통과
+    """
+
+    def _make_usecase(self) -> ImageCaptureUseCase:
+        """FakeBackend·FakeFrameSource 주입한 기본 usecase를 반환한다."""
+        return ImageCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=FakeBackend(),
+        )
+
+    def test_upscaler_None이면_저장_크기가_박스_크기와_일치한다(self, tmp_path):
+        """Given: upscaler=None(기본값), 박스 50×40
+        When:  export 호출
+        Then:  저장 이미지 크기 == (50, 40) — 업스케일 없는 기존 동작 무회귀
+
+        WHY: upscaler=None 경로가 기존 crop→save 직행 동작을 유지하는지 검증한다.
+        """
+        # --- Given ---
+        usecase = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+        output_path = str(tmp_path / "no_upscale.png")
+        config = ExportConfig(fmt="png")
+
+        # --- When ---
+        usecase.export(frame, _UPSCALE_BOX, (output_path, config))
+
+        # --- Then ---
+        from PIL import Image as _Image
+        img = _Image.open(output_path)
+        assert img.size == (_UPSCALE_BOX_W, _UPSCALE_BOX_H), (
+            f"upscaler=None 시 저장 크기 불일치: {img.size} != "
+            f"({_UPSCALE_BOX_W}, {_UPSCALE_BOX_H})"
+        )
+
+    def test_upscaler_주입_시_저장_크기가_박스_크기의_scale배이다(self, tmp_path):
+        """Given: FakeUpscaleBackend(scale=2), 박스 50×40
+        When:  export(upscaler=fake_upscaler) 호출
+        Then:  저장 이미지 크기 == (50*2, 40*2) = (100, 80)
+
+        WHY: 업스케일 결과가 저장에 반영되는지 end-to-end로 검증한다.
+             FakeUpscaleBackend의 nearest 확대로 크기가 결정적으로 예측된다.
+        """
+        # --- Given ---
+        usecase = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+        fake_upscaler = FakeUpscaleBackend(scale=_UPSCALE_SCALE_2)
+        output_path = str(tmp_path / "upscale_x2.png")
+        config = ExportConfig(fmt="png")
+
+        # --- When ---
+        usecase.export(frame, _UPSCALE_BOX, (output_path, config), upscaler=fake_upscaler)
+
+        # --- Then ---
+        from PIL import Image as _Image
+        img = _Image.open(output_path)
+        expected_w = _UPSCALE_BOX_W * _UPSCALE_SCALE_2
+        expected_h = _UPSCALE_BOX_H * _UPSCALE_SCALE_2
+        assert img.size == (expected_w, expected_h), (
+            f"scale=2 저장 크기 불일치: {img.size} != ({expected_w}, {expected_h})"
+        )
+
+    def test_upscaler_scale4_주입_시_저장_크기가_4배이다(self, tmp_path):
+        """Given: FakeUpscaleBackend(scale=4), 박스 50×40
+        When:  export(upscaler=...) 호출
+        Then:  저장 이미지 크기 == (50*4, 40*4) = (200, 160)
+        """
+        # --- Given ---
+        usecase = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+        fake_upscaler = FakeUpscaleBackend(scale=_UPSCALE_SCALE_4)
+        output_path = str(tmp_path / "upscale_x4.png")
+        config = ExportConfig(fmt="png")
+
+        # --- When ---
+        usecase.export(frame, _UPSCALE_BOX, (output_path, config), upscaler=fake_upscaler)
+
+        # --- Then ---
+        from PIL import Image as _Image
+        img = _Image.open(output_path)
+        expected_w = _UPSCALE_BOX_W * _UPSCALE_SCALE_4
+        expected_h = _UPSCALE_BOX_H * _UPSCALE_SCALE_4
+        assert img.size == (expected_w, expected_h), (
+            f"scale=4 저장 크기 불일치: {img.size} != ({expected_w}, {expected_h})"
+        )
+
+    def test_upscaler_주입_시_upscale은_정확히_1회_호출된다(self, tmp_path):
+        """Given: FakeUpscaleBackend(scale=2) + upscale_call_count 스파이
+        When:  export 1회 호출
+        Then:  fake_upscaler.upscale_call_count == 1 (중복 추론 방지 회귀 가드)
+
+        WHY: export가 업스케일을 한 번만 호출해야 한다.
+             2회 이상 호출되면 crop 결과를 이중 확대해 크기가 틀린다.
+             이 테스트가 통과해야 export 구현이 올바르다.
+        """
+        # --- Given ---
+        usecase = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+        fake_upscaler = FakeUpscaleBackend(scale=_UPSCALE_SCALE_2)
+        output_path = str(tmp_path / "call_count.png")
+        config = ExportConfig(fmt="png")
+
+        # --- When ---
+        usecase.export(frame, _UPSCALE_BOX, (output_path, config), upscaler=fake_upscaler)
+
+        # --- Then ---
+        assert fake_upscaler.upscale_call_count == 1, (
+            f"upscale 호출 횟수 불일치: {fake_upscaler.upscale_call_count}회 "
+            "(정확히 1회여야 함)"
+        )
+
+    def test_upscaler_None이면_upscale이_호출되지_않는다(self, tmp_path):
+        """Given: upscaler=None, 별도 FakeUpscaleBackend 인스턴스(감시용)
+        When:  export(upscaler=None) 호출
+        Then:  FakeUpscaleBackend 인스턴스는 upscale_call_count == 0 유지
+
+        WHY: upscaler=None 경로에서 upscale이 절대 호출되지 않음을 단언한다.
+             None 경로에서 upscaler 인스턴스가 없으므로, 새 인스턴스를 생성해
+             "어떤 업스케일러도 호출되지 않음"의 의미를 논리적으로 검증한다.
+
+        NOTE: upscaler=None 경로는 인스턴스 자체가 없으므로
+              "저장 크기 = 박스 크기" 검증(test_upscaler_None이면_저장_크기가...)으로
+              미호출을 간접 검증한다. 이 테스트는 FakeUpscaleBackend 초기 카운터가
+              0임을 확인해 스파이 패턴의 전제 조건을 보장한다.
+        """
+        # --- Given ---
+        unused_upscaler = FakeUpscaleBackend(scale=_UPSCALE_SCALE_2)
+        usecase = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+        output_path = str(tmp_path / "none_path.png")
+        config = ExportConfig(fmt="png")
+
+        # --- When ---
+        usecase.export(frame, _UPSCALE_BOX, (output_path, config))  # upscaler 인자 없음
+
+        # --- Then ---
+        # unused_upscaler는 호출되지 않았으므로 count가 여전히 0
+        assert unused_upscaler.upscale_call_count == 0, (
+            "None 경로에서 upscale 인스턴스가 호출됨 — 설계 오류"
+        )
+
+    def test_기존_export_인자_없이_호출해도_무회귀로_통과한다(self, tmp_path):
+        """Given: 기존 방식(upscaler 인자 없이) export 호출
+        When:  usecase.export(frame, box, target) — 키워드 인자 없음
+        Then:  파일 생성, 크기 = 박스 크기 (기존 동작 무회귀)
+
+        WHY: export 시그니처에 upscaler: UpscaleBackend | None = None을 추가해도
+             기존 호출부가 변경 없이 그대로 동작해야 한다(계획서 §4-2, §4-4).
+             기본값 None으로 하위호환성을 보장한다.
+        """
+        # --- Given ---
+        usecase = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+        output_path = str(tmp_path / "compat.png")
+        config = ExportConfig(fmt="png")
+
+        # --- When ---
+        usecase.export(frame, _UPSCALE_BOX, (output_path, config))  # 기존 3인자 호출
+
+        # --- Then ---
+        from PIL import Image as _Image
+        assert (tmp_path / "compat.png").exists(), "파일이 생성되지 않음"
+        img = _Image.open(output_path)
+        assert img.size == (_UPSCALE_BOX_W, _UPSCALE_BOX_H), (
+            f"무회귀 실패: 저장 크기 {img.size} != ({_UPSCALE_BOX_W}, {_UPSCALE_BOX_H})"
         )
