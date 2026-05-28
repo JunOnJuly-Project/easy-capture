@@ -7,6 +7,14 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
 ## [미출시]
 
 ### 추가
+- **이미지 모드 업스케일(SwinIR)** (`feature/image/upscale`)
+  - 크롭 결과를 저장 전 초해상도 업스케일(옵션, 배율 x2/x4=모델 선택).
+  - `core/upscale`: `UpscaleBackend` Protocol(torch 비의존) + `reconstruction_to_rgb_uint8` 순수 정규화 함수(모델 출력 CHW float→RGB uint8, 검증 리스크 격리).
+  - `infra/swin2sr_upscale_backend`: `Swin2srUpscaleBackend` — transformers `Swin2SRForImageSuperResolution`/`Swin2SRImageProcessor` 래퍼. 지연 로드. processor 8배수 패딩 보정 재크롭으로 출력 크기 = 입력×배율 보장.
+  - `app/image_capture.export(upscaler=None)`: 옵션 메서드 주입. None이면 crop→save 직행(무회귀), 주입 시 crop→upscale→save.
+  - `app/router`: `UPSCALE_MODELS` 카탈로그(repo·scale·라벨 단일 소스) + 팩토리 주입.
+  - `ui/main_window`: 업스케일 체크박스·배율 콤보 + `_UpscaleSaveWorker`(백그라운드 crop→upscale→save).
+  - 테스트 166개 통과. ADR 0009 추가. 코드 리뷰 [중요] 3건 반영(processor 패딩 보정 포함).
 - **이미지 모드 크롭 UX 확장** (`feature/image/crop-ux`)
   - 종횡비 프리셋 선택(자유/1:1/9:16/16:9) + 크롭 크기 슬라이더 + 마스크 오버레이 표시.
   - `ImageCaptureUseCase`: `segment`(SAM2 1회·무거움)/`compute_box`(순수·가벼움) 2단계 분리 → 종횡비·크기 조정 시 재세그 없이 즉시 갱신. `SegmentResult`·`BoxParams` 데이터클래스.
