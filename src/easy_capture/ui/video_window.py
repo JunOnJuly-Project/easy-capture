@@ -31,8 +31,14 @@ from PySide6.QtWidgets import (
 
 from easy_capture.core.crop.crop import ASPECT_PRESETS
 from easy_capture.core.export.video_export import VideoExportConfig
+from easy_capture.core.timing.timeremap import (
+    build_playback_schedule,
+    clamp_durations_for_gif,
+    estimate_output_frame_count,
+)
 from easy_capture.core.tracking.gap_policy import GapPolicy
 from easy_capture.ui.frame_canvas import FrameCanvas
+from easy_capture.ui.segment_table import SegmentTableWidget
 from easy_capture.ui.sizing import (
     DEFAULT_CROP_RATIO,
     MAX_CROP_RATIO,
@@ -189,7 +195,7 @@ class VideoMainWindow(QMainWindow):
         self._export_worker: _ExportWorker | None = None
 
         self._build_toolbar()
-        self._build_canvas()
+        self._build_canvas_with_segment_panel()
         self._build_statusbar()
 
     # ------------------------------------------------------------------
@@ -210,6 +216,7 @@ class VideoMainWindow(QMainWindow):
         self._build_size_slider(tb)
         self._build_smooth_spinbox(tb)
         self._build_gap_combo(tb)
+        self._build_frame_inject_buttons(tb)
         self._build_track_save_buttons(tb)
 
     def _build_span_controls(self, tb: QToolBar) -> None:
@@ -278,6 +285,22 @@ class VideoMainWindow(QMainWindow):
         self._smooth_spin.valueChanged.connect(self._on_smooth_changed)
         tb.addWidget(self._smooth_spin)
 
+    def _build_frame_inject_buttons(self, tb: QToolBar) -> None:
+        """"현재 프레임 → 시작/끝" 버튼을 툴바에 추가한다.
+
+        WHY: 사용자가 미리보기 프레임을 보면서 버튼으로 구간 경계를 지정한다.
+             프레임 번호 암기 불필요 — UX 핵심(Task 5-2).
+        """
+        self._frame_to_start_btn = QPushButton("프레임→시작")
+        self._frame_to_start_btn.clicked.connect(self._on_frame_to_start)
+        self._frame_to_start_btn.setEnabled(False)
+        tb.addWidget(self._frame_to_start_btn)
+
+        self._frame_to_end_btn = QPushButton("프레임→끝")
+        self._frame_to_end_btn.clicked.connect(self._on_frame_to_end)
+        self._frame_to_end_btn.setEnabled(False)
+        tb.addWidget(self._frame_to_end_btn)
+
     def _build_track_save_buttons(self, tb: QToolBar) -> None:
         """추적·저장 버튼을 툴바에 추가한다."""
         self._track_btn = QPushButton("추적 실행")
@@ -303,11 +326,24 @@ class VideoMainWindow(QMainWindow):
         self._save_btn.setEnabled(False)
         tb.addWidget(self._save_btn)
 
-    def _build_canvas(self) -> None:
-        """프레임 표시·클릭 캔버스를 중앙 위젯으로 설정한다."""
+    def _build_canvas_with_segment_panel(self) -> None:
+        """캔버스(프레임 표시) + 구간 테이블 패널을 중앙 위젯으로 설정한다.
+
+        WHY: SegmentTableWidget을 별도 위젯으로 캡슐화해 배선만 담당한다.
+             VideoMainWindow가 비대해지지 않도록 SRP 준수.
+        """
+        from PySide6.QtWidgets import QHBoxLayout, QWidget
+
         self._canvas = FrameCanvas()
         self._canvas.clicked.connect(self._on_canvas_click)
-        self.setCentralWidget(self._canvas)
+
+        self._segment_table = SegmentTableWidget()
+
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.addWidget(self._canvas, stretch=3)
+        layout.addWidget(self._segment_table, stretch=1)
+        self.setCentralWidget(container)
 
     def _build_statusbar(self) -> None:
         """상태 메시지 표시 바를 구성한다."""
@@ -428,6 +464,16 @@ class VideoMainWindow(QMainWindow):
             QMessageBox.warning(self, "추적 실패", message)
             self._set_status("추적에 실패했습니다. 다시 시도해 주세요.")
 
+    def _on_frame_to_start(self) -> None:
+        """현재 미리보기 구간 시작 프레임을 구간 테이블 선택 행의 시작으로 주입한다."""
+        frame_idx = self._span_start.value()
+        self._segment_table.set_frame_as_start(frame_idx)
+
+    def _on_frame_to_end(self) -> None:
+        """현재 미리보기 구간 끝 프레임을 구간 테이블 선택 행의 끝으로 주입한다."""
+        frame_idx = self._span_end.value()
+        self._segment_table.set_frame_as_end(frame_idx)
+
     def _on_aspect_changed(self, index: int) -> None:
         """종횡비 변경 시 박스 즉시 재계산(재추적 없음)."""
         _, key = _ASPECT_ITEMS[index]
@@ -453,6 +499,10 @@ class VideoMainWindow(QMainWindow):
             self._set_status("저장 중입니다. 잠시만 기다려 주세요.")
             return
 
+        segments = self._resolve_segments()
+        if segments is None:
+            return  # segments 검증 오류 — QMessageBox 이미 표시됨
+
         fmt = self._fmt_combo.currentText().lower()
         default_name = f"output.{fmt}"
         filter_str = "GIF (*.gif)" if fmt == "gif" else "MP4 (*.mp4)"
@@ -462,7 +512,11 @@ class VideoMainWindow(QMainWindow):
 
         fps = float(self._fps_spin.value())
         gap_policy = _GAP_POLICY_ITEMS[self._gap_combo.currentIndex()][1]
-        config = VideoExportConfig(fmt=fmt, fps=fps, gap_policy=gap_policy)
+        config = VideoExportConfig(fmt=fmt, fps=fps, gap_policy=gap_policy, segments=segments)
+
+        if fmt == "gif" and segments:
+            self._warn_gif_clamp_if_needed(fps, segments)
+
         self._save_btn.setEnabled(False)
         self._set_status("저장 중…")
         self._export_worker = _ExportWorker(
@@ -500,6 +554,8 @@ class VideoMainWindow(QMainWindow):
         self._span_start.setEnabled(True)
         self._span_end.setEnabled(True)
         self._track_btn.setEnabled(False)
+        self._frame_to_start_btn.setEnabled(True)
+        self._frame_to_end_btn.setEnabled(True)
 
     def _load_first_frame(self) -> None:
         """구간 첫 프레임만 추출해 캔버스에 표시한다(가벼움)."""
@@ -560,6 +616,46 @@ class VideoMainWindow(QMainWindow):
         self._boxes = self._usecase.compute_boxes(
             self._track_result, params, (frame_w, frame_h)
         )
+
+    def _resolve_segments(self):
+        """구간 테이블에서 SpeedSegment 튜플을 읽고 검증한다.
+
+        검증 오류(ValueError) 시 한국어 QMessageBox를 표시하고 None 반환.
+        WHY: export 버튼 클릭 시 구간 오류를 조기 감지해 저장 차단.
+        """
+        try:
+            return self._segment_table.to_segments()
+        except ValueError as exc:
+            QMessageBox.warning(
+                self,
+                "구간 설정 오류",
+                f"구간 설정에 오류가 있습니다.\n\n{exc}",
+            )
+            return None
+
+    def _warn_gif_clamp_if_needed(self, fps: float, segments) -> None:
+        """GIF 출력 시 20ms 클램프 대상 프레임이 있으면 경고를 표시한다.
+
+        WHY: 패스트 구간이 너무 빠르면 GIF 뷰어가 강제로 100ms를 적용한다.
+             사용자에게 사전 안내해 기대와 다른 결과를 방지한다.
+        """
+        if self._frames is None:
+            return
+        n_frames = len(self._frames)
+        schedule = build_playback_schedule(n_frames, list(segments), fps)
+        _, clamped_indices = clamp_durations_for_gif(schedule)
+
+        if clamped_indices:
+            n_clamped = len(clamped_indices)
+            self._set_status(
+                f"GIF 경고: {n_clamped}개 프레임이 20ms로 클램프됩니다."
+            )
+            QMessageBox.information(
+                self,
+                "GIF 속도 제한 안내",
+                f"{n_clamped}개 프레임의 표시 시간이 너무 짧아 20ms로 조정됩니다.\n"
+                "GIF 뷰어 호환성을 위한 자동 처리입니다.",
+            )
 
     def _set_status(self, message: str) -> None:
         """상태 바 메시지를 업데이트한다."""
