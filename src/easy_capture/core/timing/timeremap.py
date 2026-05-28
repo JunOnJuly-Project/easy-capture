@@ -6,12 +6,11 @@ WHY 독립 모듈:
   numpy·stdlib만으로 결정적 단위 테스트가 가능해야 한다.
   ADR 0013 참조.
 
-의존: stdlib + (선택) numpy — imageio·torch·PySide6·av import 금지.
+의존: stdlib — imageio·torch·PySide6·av import 금지.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
 
 # ---------------------------------------------------------------------------
 # 상수 — 매직넘버 금지
@@ -23,7 +22,7 @@ FACTOR_MAX: float = 4.0
 # 기준 표시시간 단위 (ms)
 MS_PER_SEC: float = 1000.0
 
-# GIF per-frame duration 하한 및 클램프 목표 (결정4)
+# GIF per-frame duration 하한 및 클램프 목표 (ADR 0013 결정4)
 GIF_DURATION_MIN_MS: float = 10.0
 GIF_DURATION_CLAMP_MS: float = 20.0
 
@@ -88,8 +87,12 @@ def _check_segment_direction(seg: SpeedSegment) -> None:
 
 
 def _check_segment_factor(seg: SpeedSegment) -> None:
-    """배속 factor 범위(0.25 ~ 4.0) 검증."""
-    if seg.factor <= 0 or seg.factor < FACTOR_MIN or seg.factor > FACTOR_MAX:
+    """배속 factor 범위(0.25 ~ 4.0) 검증.
+
+    WHY 단일 조건: 0/음수는 FACTOR_MIN 미만에 포함된다.
+    not (MIN <= factor <= MAX) 가 0, 음수, 초과를 모두 포착한다.
+    """
+    if not (FACTOR_MIN <= seg.factor <= FACTOR_MAX):
         raise ValueError(
             f"배속 factor={seg.factor}이(가) 허용 범위({FACTOR_MIN}~{FACTOR_MAX}) 밖입니다."
         )
@@ -114,22 +117,24 @@ def _validate_no_overlap(sorted_segs: list[SpeedSegment]) -> None:
 class PlaybackSchedule:
     """타임리맵 결과 중간 표현(불변). GIF·MP4 양쪽 산출 가능.
 
-    frame_indices:    출력할 프레임 인덱스 시퀀스.
-                      슬로우=복제로 같은 인덱스 반복, 패스트=일부 인덱스 생략.
-    durations_ms:     frame_indices와 1:1 대응하는 프레임별 표시시간(ms).
-    base_fps:         기준 fps(등속 1프레임 시간 = 1000/base_fps ms).
-                      schedule_to_cfr_indices에서 복제/드롭 비율 계산 기준.
-                      기본값 30.0은 일반 촬영 기준.
+    frame_indices:  출력할 프레임 인덱스 시퀀스(tuple).
+                    슬로우=복제로 같은 인덱스 반복, 패스트=일부 인덱스 생략.
+    durations_ms:   frame_indices와 1:1 대응하는 프레임별 표시시간(ms, tuple).
+    base_fps:       기준 fps(등속 1프레임 시간 = 1000/base_fps ms).
+                    schedule_to_cfr_indices에서 복제/드롭 비율 계산 기준.
+                    기본값 30.0은 일반 촬영 기준.
 
-    WHY frozen=True: 인코더가 소비하는 IR이므로 불변이어야 한다.
-    WHY 이중 표현: GIF는 durations_ms로 VFR 표현, MP4는 schedule_to_cfr_indices로 변환.
+    WHY frozen=True + tuple: frozen dataclass에 list 필드를 두면 해시 불가이고
+      외부에서 내부 컬렉션을 변경할 수 있어 불변 IR 표방과 모순된다.
+      tuple로 변경하면 완전한 불변성과 해시 가능성이 보장된다.
+      VideoExportConfig.segments를 tuple로 정의한 것과 동일 논리(ADR 0013 결정2).
     WHY base_fps 포함: schedule_to_cfr_indices가 PlaybackSchedule만으로
       복제/드롭 비율을 결정할 수 있어야 한다(인터페이스 최소화 원칙).
     ADR 0013 결정2 참조.
     """
 
-    frame_indices: list[int]
-    durations_ms: list[float]
+    frame_indices: tuple[int, ...]
+    durations_ms: tuple[float, ...]
     base_fps: float = 30.0
 
 
@@ -149,15 +154,15 @@ def build_playback_schedule(
     WHY 순수 함수: 인코딩·UI 비의존으로 단위 테스트 가능. 90%+ 커버리지 가드.
     """
     if n_frames == 0:
-        return PlaybackSchedule(frame_indices=[], durations_ms=[])
+        return PlaybackSchedule(frame_indices=(), durations_ms=())
 
     base_duration = MS_PER_SEC / base_fps
     normalized = normalize_segments(segments)
     factor_map = _build_factor_map(normalized, n_frames)
 
-    durations = [base_duration / factor_map[i] for i in range(n_frames)]
+    durations = tuple(base_duration / factor_map[i] for i in range(n_frames))
     return PlaybackSchedule(
-        frame_indices=list(range(n_frames)),
+        frame_indices=tuple(range(n_frames)),
         durations_ms=durations,
         base_fps=base_fps,
     )
@@ -195,6 +200,11 @@ def schedule_to_cfr_indices(schedule: PlaybackSchedule) -> list[int]:
 
     WHY Bresenham 방식: 단순 반올림은 누적 오차가 생긴다.
     시간 축을 정수 단계로 변환하는 전형적인 line-drawing 알고리즘 응용.
+
+    WHY 잔여 보장(최소 1프레임):
+      패스트 구간에서 ratio < 1.0이면 누적기가 1.0에 못 미쳐 마지막 프레임이
+      결과에 포함되지 않을 수 있다. 입력이 비어있지 않은데 결과가 비면
+      MP4에서 해당 구간 전체가 소실되므로, 최소 1프레임(마지막 원본 인덱스)를 보장한다.
     """
     if not schedule.frame_indices:
         return []
@@ -203,12 +213,21 @@ def schedule_to_cfr_indices(schedule: PlaybackSchedule) -> list[int]:
     accumulator: float = 0.0
     base_dur = MS_PER_SEC / schedule.base_fps  # 등속 1프레임 기준 시간
 
+    last_fi = schedule.frame_indices[-1]
     for fi, dur in zip(schedule.frame_indices, schedule.durations_ms):
         accumulator += dur / base_dur
         count = int(accumulator)
         for _ in range(count):
             result.append(fi)
         accumulator -= count
+
+    # 잔여 보장: 루프 후 누적기에 잔여(>0)가 있거나 결과가 비면
+    # 마지막 원본 인덱스를 추가해 패스트 구간 소실을 방지한다.
+    # WHY: ratio < 1.0인 패스트 프레임은 누적기가 1.0에 못 미쳐 드롭된다.
+    # 단일 패스트 프레임이나 끝부분 패스트 구간이 완전 소실되면
+    # MP4에서 해당 구간 자체가 사라지는 치명적 결함이 된다.
+    if accumulator > 0 or not result:
+        result.append(last_fi)
 
     return result
 
@@ -233,7 +252,7 @@ def clamp_durations_for_gif(
         인덱스 목록은 UI·노트북 경고 표시용.
     """
     if not schedule.durations_ms:
-        return PlaybackSchedule(frame_indices=[], durations_ms=[]), []
+        return PlaybackSchedule(frame_indices=(), durations_ms=()), []
 
     new_durations: list[float] = []
     clamped_indices: list[int] = []
@@ -245,8 +264,11 @@ def clamp_durations_for_gif(
         else:
             new_durations.append(dur)
 
+    # WHY 새 tuple 생성: frame_indices는 불변 참조 재사용(변경 없음),
+    # durations_ms는 클램프 결과 새 tuple로 완전히 새 객체 보장.
     clamped_schedule = PlaybackSchedule(
         frame_indices=schedule.frame_indices,
-        durations_ms=new_durations,
+        durations_ms=tuple(new_durations),
+        base_fps=schedule.base_fps,
     )
     return clamped_schedule, clamped_indices

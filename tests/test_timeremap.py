@@ -320,16 +320,18 @@ class TestPlaybackSchedule:
     """PlaybackSchedule(frame_indices, durations_ms) frozen dataclass 계약."""
 
     def test_필드가_올바르게_저장된다(self):
-        """Given: frame_indices, durations_ms 리스트
+        """Given: frame_indices, durations_ms tuple
         When:  PlaybackSchedule 생성
         Then:  각 필드가 전달값과 일치한다.
 
         WHY: 중간 표현(IR)의 기본 계약.
              GIF·MP4 양쪽에서 이 객체를 소비하므로 필드 정확성 필수.
+             WHY tuple: frozen dataclass + list = 해시 불가 + 외부 변경 가능 모순.
+             tuple로 완전한 불변성과 해시 가능성 보장(ADR 0013 결정2 보강).
         """
         _require_timeremap()
-        indices = [0, 1, 2, 2, 3]    # 슬로우 = 인덱스 2 복제
-        durations = [33.3, 33.3, 66.6, 66.6, 33.3]
+        indices = (0, 1, 2, 2, 3)    # 슬로우 = 인덱스 2 복제
+        durations = (33.3, 33.3, 66.6, 66.6, 33.3)
 
         sched = PlaybackSchedule(frame_indices=indices, durations_ms=durations)
 
@@ -345,8 +347,8 @@ class TestPlaybackSchedule:
         """
         _require_timeremap()
         n = 5
-        indices = list(range(n))
-        durations = [DURATION_30FPS_MS] * n
+        indices = tuple(range(n))
+        durations = (DURATION_30FPS_MS,) * n
 
         sched = PlaybackSchedule(frame_indices=indices, durations_ms=durations)
 
@@ -377,7 +379,7 @@ class TestBuildPlaybackSchedule:
             base_fps=BASE_FPS_30,
         )
 
-        assert sched.frame_indices == list(range(N_FRAMES_10))
+        assert sched.frame_indices == tuple(range(N_FRAMES_10))
 
     def test_segments_빈리스트면_durations_ms가_균일하다(self):
         """Given: n_frames=10, segments=[], base_fps=30
@@ -634,8 +636,8 @@ class TestScheduleToCfrIndices:
         _require_timeremap()
         n = N_FRAMES_6
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[DURATION_30FPS_MS] * n,
+            frame_indices=tuple(range(n)),
+            durations_ms=(DURATION_30FPS_MS,) * n,
         )
 
         result = schedule_to_cfr_indices(sched)
@@ -655,8 +657,8 @@ class TestScheduleToCfrIndices:
         n = 4
         dur_slow = DURATION_30FPS_MS / FACTOR_HALF  # 66.666 ms
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[dur_slow] * n,
+            frame_indices=tuple(range(n)),
+            durations_ms=(dur_slow,) * n,
         )
 
         result = schedule_to_cfr_indices(sched)
@@ -677,8 +679,8 @@ class TestScheduleToCfrIndices:
         n = N_FRAMES_6
         dur_fast = DURATION_30FPS_MS / FACTOR_DOUBLE  # 16.666 ms
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[dur_fast] * n,
+            frame_indices=tuple(range(n)),
+            durations_ms=(dur_fast,) * n,
         )
 
         result = schedule_to_cfr_indices(sched)
@@ -699,8 +701,8 @@ class TestScheduleToCfrIndices:
         n = N_FRAMES_6
         dur_slow = DURATION_30FPS_MS / FACTOR_HALF
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[dur_slow] * n,
+            frame_indices=tuple(range(n)),
+            durations_ms=(dur_slow,) * n,
         )
 
         result = schedule_to_cfr_indices(sched)
@@ -717,8 +719,8 @@ class TestScheduleToCfrIndices:
         _require_timeremap()
         n = 4
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[DURATION_30FPS_MS] * n,
+            frame_indices=tuple(range(n)),
+            durations_ms=(DURATION_30FPS_MS,) * n,
         )
 
         result = schedule_to_cfr_indices(sched)
@@ -728,7 +730,7 @@ class TestScheduleToCfrIndices:
             assert isinstance(idx, int), f"int가 아님: {type(idx)}"
 
     def test_슬로우_구간_복제_프레임은_원본_인덱스_반복이다(self):
-        """Given: frame_indices=[3], durations=66.666ms (0.5x 슬로우)
+        """Given: frame_indices=(3,), durations=66.666ms (0.5x 슬로우)
         When:  schedule_to_cfr_indices 호출
         Then:  결과 리스트에 인덱스 3이 2번 포함된다(±복제 전략 허용).
 
@@ -737,14 +739,59 @@ class TestScheduleToCfrIndices:
         """
         _require_timeremap()
         sched = PlaybackSchedule(
-            frame_indices=[3],
-            durations_ms=[DURATION_30FPS_MS / FACTOR_HALF],
+            frame_indices=(3,),
+            durations_ms=(DURATION_30FPS_MS / FACTOR_HALF,),
         )
 
         result = schedule_to_cfr_indices(sched)
 
         # 인덱스 3이 복제되어 2번 이상 나타나야 함
         assert result.count(3) >= 2, f"슬로우 프레임 3이 {result.count(3)}번만 등장"
+
+    def test_단일_패스트_프레임은_비지_않는다(self):
+        """Given: frame_indices=(7,), durations=16.666ms (2.0x 패스트)
+        When:  schedule_to_cfr_indices 호출
+        Then:  결과 리스트가 비어있지 않다(최소 1프레임 보장).
+
+        WHY: [중요1] Bresenham 누적기에서 ratio < 1.0인 단일 패스트 프레임은
+             루프 종료 후 accumulator < 1.0로 결과에 포함되지 않는다.
+             MP4에서 패스트 구간 전체 소실(빈 리스트)은 치명적이므로
+             입력이 비어있지 않으면 최소 1프레임(마지막 원본 인덱스) 보장.
+        """
+        _require_timeremap()
+        sched = PlaybackSchedule(
+            frame_indices=(7,),
+            durations_ms=(DURATION_30FPS_MS / FACTOR_DOUBLE,),  # 2.0x = 16.666ms
+        )
+
+        result = schedule_to_cfr_indices(sched)
+
+        assert len(result) >= 1, "단일 패스트 프레임이 결과에서 소실됨"
+        assert 7 in result, f"원본 인덱스 7이 결과에 없음: {result}"
+
+    def test_패스트로_끝나는_시퀀스는_비지_않는다(self):
+        """Given: 앞은 등속, 끝 1프레임만 4.0x 극패스트
+        When:  schedule_to_cfr_indices 호출
+        Then:  결과가 비어있지 않고, 마지막 원본 인덱스가 포함된다.
+
+        WHY: [중요1] 시퀀스 끝부분에 짧은 패스트 구간이 있으면
+             Bresenham 누적기 잔여값이 버려져 해당 구간 프레임이 소실될 수 있다.
+             마지막 프레임 최소 보장 가드가 이 케이스를 방어한다.
+        """
+        _require_timeremap()
+        dur_normal = DURATION_30FPS_MS
+        dur_fast_4x = DURATION_30FPS_MS / FACTOR_QUAD  # 8.333ms
+
+        # 앞 4프레임 등속 + 마지막 1프레임 4x 패스트
+        sched = PlaybackSchedule(
+            frame_indices=(0, 1, 2, 3, 9),
+            durations_ms=(dur_normal, dur_normal, dur_normal, dur_normal, dur_fast_4x),
+        )
+
+        result = schedule_to_cfr_indices(sched)
+
+        assert len(result) > 0, "패스트로 끝나는 시퀀스 결과가 비어있음"
+        assert 9 in result, f"마지막 원본 인덱스 9가 결과에 없음: {result}"
 
 
 # ===========================================================================
@@ -768,8 +815,8 @@ class TestClampDurationsForGif:
         _require_timeremap()
         n = N_FRAMES_6
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[DURATION_12FPS_MS] * n,   # 83.333 ms — 안전 범위
+            frame_indices=tuple(range(n)),
+            durations_ms=(DURATION_12FPS_MS,) * n,   # 83.333 ms — 안전 범위
         )
 
         clamped, clamp_indices = clamp_durations_for_gif(sched)
@@ -790,8 +837,8 @@ class TestClampDurationsForGif:
         dur_4x = DURATION_30FPS_MS / FACTOR_QUAD   # ≈ 8.333 ms
         n = 5
         sched = PlaybackSchedule(
-            frame_indices=list(range(n)),
-            durations_ms=[dur_4x] * n,
+            frame_indices=tuple(range(n)),
+            durations_ms=(dur_4x,) * n,
         )
 
         clamped, clamp_indices = clamp_durations_for_gif(sched)
@@ -815,8 +862,8 @@ class TestClampDurationsForGif:
 
         # frame 0,1: 정상, frame 2,3: 클램프 대상
         sched = PlaybackSchedule(
-            frame_indices=[0, 1, 2, 3],
-            durations_ms=[dur_safe, dur_safe, dur_fast, dur_fast],
+            frame_indices=(0, 1, 2, 3),
+            durations_ms=(dur_safe, dur_safe, dur_fast, dur_fast),
         )
 
         _, clamp_indices = clamp_durations_for_gif(sched)
@@ -836,8 +883,8 @@ class TestClampDurationsForGif:
         _require_timeremap()
         dur_fast = DURATION_30FPS_MS / FACTOR_QUAD  # 8.333 ms
         sched = PlaybackSchedule(
-            frame_indices=list(range(N_FRAMES_10)),
-            durations_ms=[dur_fast] * N_FRAMES_10,
+            frame_indices=tuple(range(N_FRAMES_10)),
+            durations_ms=(dur_fast,) * N_FRAMES_10,
         )
 
         clamped, _ = clamp_durations_for_gif(sched)
@@ -855,10 +902,10 @@ class TestClampDurationsForGif:
         """
         _require_timeremap()
         dur_fast = DURATION_30FPS_MS / FACTOR_QUAD
-        original_indices = list(range(N_FRAMES_6))
+        original_indices = tuple(range(N_FRAMES_6))
         sched = PlaybackSchedule(
             frame_indices=original_indices,
-            durations_ms=[dur_fast] * N_FRAMES_6,
+            durations_ms=(dur_fast,) * N_FRAMES_6,
         )
 
         clamped, _ = clamp_durations_for_gif(sched)
@@ -872,8 +919,8 @@ class TestClampDurationsForGif:
         """
         _require_timeremap()
         sched = PlaybackSchedule(
-            frame_indices=[0, 1],
-            durations_ms=[DURATION_30FPS_MS] * 2,
+            frame_indices=(0, 1),
+            durations_ms=(DURATION_30FPS_MS,) * 2,
         )
 
         result = clamp_durations_for_gif(sched)
@@ -893,8 +940,8 @@ class TestClampDurationsForGif:
         """
         _require_timeremap()
         sched = PlaybackSchedule(
-            frame_indices=[0],
-            durations_ms=[GIF_MIN_DURATION_MS],  # 정확히 10ms
+            frame_indices=(0,),
+            durations_ms=(GIF_MIN_DURATION_MS,),  # 정확히 10ms
         )
 
         _, clamp_indices = clamp_durations_for_gif(sched)
@@ -1086,8 +1133,8 @@ class TestEdgeCasesZeroFrames:
             base_fps=BASE_FPS_30,
         )
 
-        assert sched.frame_indices == []
-        assert sched.durations_ms == []
+        assert sched.frame_indices == ()
+        assert sched.durations_ms == ()
 
     def test_n_frames_0_cfr_변환은_빈_리스트이다(self):
         """Given: 빈 PlaybackSchedule
@@ -1095,7 +1142,7 @@ class TestEdgeCasesZeroFrames:
         Then:  빈 리스트 반환.
         """
         _require_timeremap()
-        sched = PlaybackSchedule(frame_indices=[], durations_ms=[])
+        sched = PlaybackSchedule(frame_indices=(), durations_ms=())
 
         result = schedule_to_cfr_indices(sched)
 
@@ -1107,10 +1154,10 @@ class TestEdgeCasesZeroFrames:
         Then:  (빈 PlaybackSchedule, []) 반환.
         """
         _require_timeremap()
-        sched = PlaybackSchedule(frame_indices=[], durations_ms=[])
+        sched = PlaybackSchedule(frame_indices=(), durations_ms=())
 
         clamped, clamp_indices = clamp_durations_for_gif(sched)
 
-        assert clamped.frame_indices == []
-        assert clamped.durations_ms == []
+        assert clamped.frame_indices == ()
+        assert clamped.durations_ms == ()
         assert clamp_indices == []
