@@ -813,3 +813,260 @@ class TestGifVariableDuration:
 
         with pytest.raises(ValueError):
             encode_frames(crops, output_path, config)
+
+
+# ---------------------------------------------------------------------------
+# Story 3 — MP4 프레임 복제/드롭 통합 (TDD RED)
+# ---------------------------------------------------------------------------
+# Story 3 테스트 상수 — 매직넘버 금지
+_S3_FPS = 12.0                   # MP4 CFR 출력 fps
+_S3_N_FRAMES = 10                # 총 프레임 수
+_S3_SLOW_START = 2               # 슬로우 구간 시작 인덱스 (포함)
+_S3_SLOW_END = 5                 # 슬로우 구간 끝 인덱스 (미포함) → 프레임 2,3,4 (3개)
+_S3_SLOW_FACTOR = 0.5            # 슬로우 배속 → 구간 3프레임 ×2 ≈ 6프레임
+_S3_FAST_START = 2               # 패스트 구간 시작 인덱스 (포함)
+_S3_FAST_END = 6                 # 패스트 구간 끝 인덱스 (미포함) → 프레임 2,3,4,5 (4개)
+_S3_FAST_FACTOR = 2.0            # 패스트 배속 → 구간 4프레임 ×0.5 ≈ 2프레임
+_S3_FRAME_COUNT_TOLERANCE = 1    # 프레임 수 허용 오차 (Bresenham ±1)
+
+# 패스트 가드 테스트 상수
+_S3_GUARD_N_FRAMES = 3           # 패스트 가드용 짧은 총 프레임 수
+_S3_GUARD_FAST_START = 0         # 전체 구간 패스트
+_S3_GUARD_FAST_FACTOR = 2.0      # 드롭 적극적 — 최소 1프레임 보장 검증
+
+# Story 3 import guard: video_export + timeremap 모두 존재해야 실행
+# WHY: schedule_to_cfr_indices는 timeremap 모듈에 있으므로 별도 확인
+try:
+    from easy_capture.core.timing.timeremap import schedule_to_cfr_indices
+    _HAS_CFR_INDICES = True
+except ImportError:
+    schedule_to_cfr_indices = None  # type: ignore[assignment,misc]
+    _HAS_CFR_INDICES = False
+
+_STORY3_SKIP = not (_HAS_VIDEO_EXPORT and _HAS_TIMEREMAP and _HAS_CFR_INDICES)
+_MSG_STORY3_NOT_IMPL = (
+    "Story 3 미구현 — encode_frames MP4 segments 분기 또는 timeremap 미지원"
+)
+
+
+def _make_synth_crops_s3(n: int = _S3_N_FRAMES) -> list[np.ndarray]:
+    """Story 3용 n개 합성 크롭 프레임(32×24 RGB)을 반환한다.
+
+    WHY 프레임별 색 다르게:
+      R채널 값으로 프레임 인덱스를 구분해 복제/드롭 후 재배열이 올바른지
+      프레임 수 단위로 검증할 수 있게 한다.
+    """
+    return _make_synth_frames(n=n, h=CROP_BOX_H, w=CROP_BOX_W)
+
+
+def _count_mp4_frames(mp4_path: str) -> int:
+    """imageio(ffmpeg)로 MP4 파일의 총 프레임 수를 반환한다.
+
+    WHY imageio get_reader:
+      imageio-ffmpeg의 get_reader("ffmpeg")는 프레임 단위 순회를 지원하며
+      GIF mimread와 달리 MP4 CFR 검증에 적합하다.
+    WHY 전체 순회:
+      meta_data의 nframes 필드는 추정치일 수 있으므로 직접 순회로 정확히 센다.
+    """
+    import imageio
+    count = 0
+    with imageio.get_reader(mp4_path, format="ffmpeg") as reader:
+        for _ in reader:
+            count += 1
+    return count
+
+
+class TestMp4FrameReplication:
+    """Story 3: MP4 CFR 프레임 복제/드롭 통합 테스트.
+
+    encode_frames(fmt='mp4', segments=...) 계약 검증:
+      - segments=() → 기존 경로(crops 그대로)와 동일 프레임 수
+      - 슬로우 구간 → 프레임 복제 → MP4 재로드 시 총 프레임 수 증가
+      - 패스트 구간 → 프레임 드롭 → 총 프레임 수 감소
+      - 단일 패스트 가드 → MP4 프레임 수 ≥ 1 (빈 영상 금지)
+
+    TDD RED 예상: 현재 encode_frames MP4 경로는 config.segments를 무시하고
+    crops를 그대로 _encode_mp4에 전달한다(video_export.py 89번줄).
+    Story 3 구현(segments 분기 + schedule_to_cfr_indices 호출) 전까지
+    슬로우/패스트 프레임 수 검증 테스트가 실패한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_EXPORT, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_MP4_segments_빈_튜플이면_기존_경로와_동일_프레임_수다(self, tmp_path):
+        """Given: 10개 크롭, segments=(), fps=12, fmt='mp4'
+        When:  encode_frames 호출 후 MP4 재로드
+        Then:  총 프레임 수 == 10 (crops 그대로 전달, 복제/드롭 없음)
+
+        WHY (무회귀): segments=() MP4 경로는 기존 _encode_mp4(crops) 호출과
+             완전히 동일해야 한다. Story 3 구현이 기존 MP4 테스트를 깨면 안 된다.
+        """
+        # Given
+        crops = _make_synth_crops_s3(_S3_N_FRAMES)
+        config = VideoExportConfig(fmt="mp4", fps=_S3_FPS, segments=())
+        output_path = str(tmp_path / "mp4_no_segments.mp4")
+
+        # When
+        encode_frames(crops, output_path, config)
+
+        # Then
+        actual_count = _count_mp4_frames(output_path)
+        assert actual_count == _S3_N_FRAMES, (
+            f"segments=() MP4 프레임 수 불일치: {actual_count} vs {_S3_N_FRAMES}. "
+            "segments=() 경로는 crops 그대로 전달해야 함(무회귀)."
+        )
+
+    @pytest.mark.skipif(_STORY3_SKIP, reason=_MSG_STORY3_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_MP4_슬로우_구간_프레임이_복제되어_총_프레임_수가_증가한다(self, tmp_path):
+        """Given: 10개 크롭, segments=(SpeedSegment(2, 5, 0.5),), fps=12, fmt='mp4'
+        When:  encode_frames 호출 후 imageio로 MP4 재로드
+        Then:  총 프레임 수 ≈ 13 (±1)
+               구간 밖 7프레임(0,1,5~9) + 슬로우 구간 3프레임 × 2배 ≈ 6 = 13
+
+        WHY 복제 검증:
+          슬로우 factor=0.5 → duration이 기준의 2배 → schedule_to_cfr_indices가
+          해당 프레임 인덱스를 2회 반복 삽입 → _encode_mp4에 복제 프레임 전달.
+          MP4 CFR이므로 duration이 아니라 프레임 수로 속도를 표현한다.
+
+        WHY ±1 허용:
+          Bresenham 누적기 방식은 정수 반올림 오차로 ±1 차이가 발생할 수 있다.
+        """
+        # Given
+        crops = _make_synth_crops_s3(_S3_N_FRAMES)
+        slow_seg = SpeedSegment(_S3_SLOW_START, _S3_SLOW_END, _S3_SLOW_FACTOR)
+        config = VideoExportConfig(fmt="mp4", fps=_S3_FPS, segments=(slow_seg,))
+        output_path = str(tmp_path / "mp4_slow.mp4")
+
+        # 기대 프레임 수 계산 (매직넘버 금지 — 상수 조합)
+        # 구간 밖 프레임 수: _S3_N_FRAMES - (_S3_SLOW_END - _S3_SLOW_START) = 10 - 3 = 7
+        # 슬로우 구간 프레임 수: (end - start) / factor = 3 / 0.5 = 6
+        _N_OUTSIDE = _S3_N_FRAMES - (_S3_SLOW_END - _S3_SLOW_START)
+        _N_SLOW_EXPECTED = round((_S3_SLOW_END - _S3_SLOW_START) / _S3_SLOW_FACTOR)
+        _EXPECTED_TOTAL = _N_OUTSIDE + _N_SLOW_EXPECTED  # 7 + 6 = 13
+
+        # When
+        encode_frames(crops, output_path, config)
+
+        # Then
+        actual_count = _count_mp4_frames(output_path)
+        assert abs(actual_count - _EXPECTED_TOTAL) <= _S3_FRAME_COUNT_TOLERANCE, (
+            f"슬로우 MP4 프레임 수 불일치: {actual_count} vs 기대 {_EXPECTED_TOTAL} "
+            f"(±{_S3_FRAME_COUNT_TOLERANCE}). "
+            f"segments=({_S3_SLOW_START},{_S3_SLOW_END},{_S3_SLOW_FACTOR}) 복제 미적용 의심."
+        )
+
+    @pytest.mark.skipif(_STORY3_SKIP, reason=_MSG_STORY3_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_MP4_패스트_구간_프레임이_드롭되어_총_프레임_수가_감소한다(self, tmp_path):
+        """Given: 10개 크롭, segments=(SpeedSegment(2, 6, 2.0),), fps=12, fmt='mp4'
+        When:  encode_frames 호출 후 MP4 재로드
+        Then:  총 프레임 수 < 10 (패스트 구간 4프레임 → ≈ 2프레임으로 드롭)
+               기대 ≈ 8: 구간 밖 6 + 구간 4×0.5=2 = 8
+
+        WHY 드롭 검증:
+          패스트 factor=2.0 → duration이 기준의 0.5배 → schedule_to_cfr_indices가
+          ratio=0.5로 2프레임 중 1프레임만 삽입 → _encode_mp4에 드롭된 시퀀스 전달.
+          전체 프레임 수가 원본 10보다 줄어들면 드롭이 적용된 것이다.
+        """
+        # Given
+        crops = _make_synth_crops_s3(_S3_N_FRAMES)
+        fast_seg = SpeedSegment(_S3_FAST_START, _S3_FAST_END, _S3_FAST_FACTOR)
+        config = VideoExportConfig(fmt="mp4", fps=_S3_FPS, segments=(fast_seg,))
+        output_path = str(tmp_path / "mp4_fast.mp4")
+
+        # 기대 프레임 수 계산
+        # 구간 밖: _S3_N_FRAMES - (_S3_FAST_END - _S3_FAST_START) = 10 - 4 = 6
+        # 패스트 구간: (end - start) × (1/factor) = 4 × 0.5 = 2
+        _N_OUTSIDE_FAST = _S3_N_FRAMES - (_S3_FAST_END - _S3_FAST_START)
+        _N_FAST_EXPECTED = round((_S3_FAST_END - _S3_FAST_START) / _S3_FAST_FACTOR)
+        _EXPECTED_FAST_TOTAL = _N_OUTSIDE_FAST + _N_FAST_EXPECTED  # 6 + 2 = 8
+
+        # When
+        encode_frames(crops, output_path, config)
+
+        # Then
+        actual_count = _count_mp4_frames(output_path)
+        assert actual_count < _S3_N_FRAMES, (
+            f"패스트 드롭 미적용: actual={actual_count} >= {_S3_N_FRAMES}(원본). "
+            f"segments=({_S3_FAST_START},{_S3_FAST_END},{_S3_FAST_FACTOR}) 드롭 경로 미구현 의심."
+        )
+        assert abs(actual_count - _EXPECTED_FAST_TOTAL) <= _S3_FRAME_COUNT_TOLERANCE, (
+            f"패스트 MP4 프레임 수 불일치: {actual_count} vs 기대 {_EXPECTED_FAST_TOTAL} "
+            f"(±{_S3_FRAME_COUNT_TOLERANCE})."
+        )
+
+    @pytest.mark.skipif(_STORY3_SKIP, reason=_MSG_STORY3_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_MP4_단일_패스트_가드_프레임_수가_최소_1이다(self, tmp_path):
+        """Given: 3개 크롭 전체 패스트(factor=2.0), fmt='mp4'
+        When:  encode_frames 호출 후 MP4 재로드
+        Then:  총 프레임 수 >= 1 (빈 영상 금지)
+
+        WHY [중요]1 가드 실검증:
+          schedule_to_cfr_indices는 패스트 구간에서 ratio < 1.0이면 누적기가
+          1.0에 못 미쳐 일부 프레임이 드롭될 수 있다. 모든 프레임이 드롭되어
+          빈 시퀀스가 _encode_mp4에 전달되면 파일 크기=0 또는 코덱 오류가 된다.
+          최소 1프레임 보장(잔여 보장)이 encode_frames MP4 경로에서 동작하는지
+          실제 파일 생성으로 검증한다.
+
+        WHY 3프레임:
+          factor=2.0 이면 ratio=0.5, 3프레임×0.5=1.5 → 정수 드롭 시 1프레임.
+          Bresenham 잔여 보장이 없으면 0 또는 1 경계에서 비결정적이 된다.
+          3프레임은 이 경계를 명확히 테스트하는 최소 크기다.
+
+        TDD 상태 노트:
+          RED 단계에서는 segments 무시 → 3프레임 그대로 전달 → ≥1 통과.
+          Story 3 구현 후(GREEN)에는 Bresenham 잔여 보장이 동작해 동일 통과.
+          이 테스트는 구현 전/후 모두 PASS여야 하는 불변식 가드다.
+        """
+        # Given
+        crops = _make_synth_crops_s3(_S3_GUARD_N_FRAMES)
+        guard_seg = SpeedSegment(
+            _S3_GUARD_FAST_START,
+            _S3_GUARD_N_FRAMES,   # 전체 구간 패스트
+            _S3_GUARD_FAST_FACTOR,
+        )
+        config = VideoExportConfig(fmt="mp4", fps=_S3_FPS, segments=(guard_seg,))
+        output_path = str(tmp_path / "mp4_guard.mp4")
+
+        # When
+        encode_frames(crops, output_path, config)
+
+        # Then — 파일 존재 + 프레임 수 ≥ 1
+        assert (tmp_path / "mp4_guard.mp4").exists(), (
+            "단일 패스트 가드: MP4 파일이 생성되지 않음 — encode_frames가 빈 시퀀스를 전달했을 수 있음."
+        )
+        actual_count = _count_mp4_frames(output_path)
+        assert actual_count >= 1, (
+            f"단일 패스트 가드 실패: MP4 프레임 수 = {actual_count} < 1. "
+            "schedule_to_cfr_indices 잔여 보장([중요]1)이 encode_frames MP4 경로에서 "
+            "동작하지 않음. 빈 영상 생성 위험."
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_EXPORT, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_MP4_segments_없는_기존_테스트_무회귀(self, tmp_path):
+        """Given: 6개 크롭(기존 TestMp4Roundtrip과 동일 조건), segments 미지정
+        When:  encode_frames(fmt='mp4', fps=24) 호출
+        Then:  파일 존재 + 크기 > 0 (기존 계약 유지)
+
+        WHY 무회귀 명시:
+          Story 3 구현 후 segments=() MP4 경로가 기존 동작을 그대로 유지하는지
+          TestMp4Roundtrip과 독립적으로 재검증한다.
+          TestMp4Roundtrip.test_MP4_encode_후_파일이_생성된다와 동일 시나리오를
+          Story 3 클래스 내에서 반복 확인해 회귀를 이중 가드한다.
+        """
+        # Given
+        crops = crop_frames(_make_synth_frames(), _make_crop_boxes())
+        config = VideoExportConfig(fmt="mp4", fps=MP4_FPS)  # segments 미지정 = ()
+        output_path = str(tmp_path / "mp4_regression.mp4")
+
+        # When
+        encode_frames(crops, output_path, config)
+
+        # Then
+        assert (tmp_path / "mp4_regression.mp4").exists(), "무회귀 MP4 파일 미생성"
+        assert (tmp_path / "mp4_regression.mp4").stat().st_size > 0, (
+            "무회귀 MP4 파일 크기 = 0"
+        )
