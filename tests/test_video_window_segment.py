@@ -313,6 +313,56 @@ class TestSegmentTableFrameInjectButtons:
         # 예외 없이 통과해야 함
         widget.set_frame_as_start(10)
 
+    def test_set_frame_as_start_0을_주입하면_상대_인덱스_0이다(self):
+        """Given: 행 1개 있는 SegmentTableWidget
+        When:  set_frame_as_start(0) 호출
+        Then:  start == 0 (span 상대 인덱스 기준 첫 프레임).
+
+        WHY [중요1]: export 경로의 segments는 read_span_frames(span) crops의
+                     상대 인덱스 [0, n)를 기준으로 소비된다.
+                     프레임→시작 버튼은 span 첫 프레임 = 상대 0을 주입해야
+                     span_start ≠ 0일 때도 export 정합이 보장된다.
+        """
+        _require_widget()
+        _get_app()
+
+        widget = SegmentTableWidget()
+        widget.add_row()
+        widget.setCurrentCell(0, 0)
+
+        # 상대 인덱스 0 주입 (span_start 절대값 무관)
+        widget.set_frame_as_start(0)
+
+        row_data = widget.get_row_data(0)
+        assert row_data[0] == 0, f"상대 시작 인덱스 오류: {row_data[0]}"
+
+    def test_set_frame_as_end에_span_길이를_주입하면_n과_일치한다(self):
+        """Given: 행 1개 있는 SegmentTableWidget
+        When:  set_frame_as_end(span_len) 호출 (span_len = end - start)
+        Then:  end == span_len (상대 끝 인덱스 = n).
+
+        WHY [중요1]: 상대 끝 = span 전체 길이.
+                     절대 span_end를 주입하면 crops 배열 [0, n) 범위를 초과한다.
+                     span_start=30, span_end=60 → 상대 끝=30이 옳다.
+        """
+        _require_widget()
+        _get_app()
+
+        span_start_abs = 30   # 절대 span 시작 (임의값)
+        span_end_abs = 60     # 절대 span 끝
+        span_len = span_end_abs - span_start_abs  # 상대 끝 = 30
+
+        widget = SegmentTableWidget()
+        widget.add_row()
+        widget.setCurrentCell(0, 0)
+
+        widget.set_frame_as_end(span_len)  # 상대 인덱스 주입
+
+        row_data = widget.get_row_data(0)
+        assert row_data[1] == span_len, (
+            f"상대 끝 인덱스 오류: 예상 {span_len}, 실제 {row_data[1]}"
+        )
+
 
 # ===========================================================================
 # 3. 배속 ComboBox 프리셋 항목 검증

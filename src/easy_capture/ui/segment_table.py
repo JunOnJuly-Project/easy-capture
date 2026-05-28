@@ -121,17 +121,23 @@ class SegmentTableWidget(QWidget):
     """구간별 배속 설정 테이블 위젯.
 
     QTableWidget(시작/끝 SpinBox · 배속 ComboBox) + 추가/삭제 버튼.
-    set_frame_as_start/set_frame_as_end로 현재 미리보기 프레임을 구간에 주입.
+    set_frame_as_start/set_frame_as_end로 현재 미리보기 프레임(상대 인덱스)을 주입.
     to_segments()로 rows_to_segments에 위임해 SpeedSegment 튜플 반환.
+    set_base_fps(fps)로 패스트 상한 초과 ComboBox 항목을 비활성화한다(Task 5-3).
 
     WHY QWidget 캡슐화:
         VideoMainWindow가 비대해지지 않도록 구간 테이블 책임을 분리한다.
         통합은 생성·배선만 담당한다(SRP).
+
+    WHY 상대 인덱스:
+        export 경로의 segments는 read_span_frames(span)로 자른 crops의
+        상대 인덱스 [0, n)를 기준으로 build_playback_schedule이 소비한다.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """위젯 초기화 — 테이블 + 버튼 배치."""
         super().__init__(parent)
+        self._base_fps: float | None = None  # 동적 패스트 상한 계산용
         self._build_table()
         self._build_buttons()
         self._build_layout()
@@ -215,6 +221,24 @@ class SegmentTableWidget(QWidget):
         """
         return self._get_combo(row, _COL_SPEED)
 
+    def set_base_fps(self, base_fps: float) -> None:
+        """원본 영상 fps를 설정하고 패스트 상한 초과 항목을 비활성화한다(Task 5-3).
+
+        dynamic_fast_cap(base_fps)를 계산해 초과하는 ComboBox 프리셋 항목을
+        disabled + 툴팁 경고로 표시한다.
+
+        WHY: GIF에서 패스트 상한 초과 배속을 선택하면 duration < 20ms가 되어
+             뷰어가 강제 100ms를 적용한다. 선택 단계에서 미리 안내해 혼란을 방지.
+             base_fps 없을 때는 모든 항목 활성화(방어).
+
+        Args:
+            base_fps: 원본 영상 fps (> 0).
+        """
+        self._base_fps = base_fps
+        cap = dynamic_fast_cap(base_fps)
+        for row in range(self.rowCount()):
+            self._apply_fast_cap_to_row(row, cap)
+
     def to_segments(self) -> tuple[SpeedSegment, ...]:
         """현재 테이블 전체 행 데이터를 SpeedSegment 튜플로 변환한다.
 
@@ -262,6 +286,39 @@ class SegmentTableWidget(QWidget):
         self._table.setCellWidget(row, _COL_SPEED, self._make_speed_combo())
         # QTableWidget이 아이템 없이 위젯만 있으면 선택이 안 되는 경우 방어
         self._table.setItem(row, _COL_START, QTableWidgetItem(""))
+        # 행 추가 시 현재 base_fps cap 즉시 적용
+        if self._base_fps is not None:
+            self._apply_fast_cap_to_row(row, dynamic_fast_cap(self._base_fps))
+
+    def _apply_fast_cap_to_row(self, row: int, cap: float) -> None:
+        """지정 행의 ComboBox에서 cap 초과 항목을 비활성화하고 툴팁을 설정한다.
+
+        WHY: 개별 행 단위 적용으로 set_base_fps(전체) / add_row(신규)에서 재사용.
+        """
+        combo = self._get_combo(row, _COL_SPEED)
+        if combo is None:
+            return
+        for i in range(combo.count()):
+            factor = combo.itemData(i)
+            if factor is None:
+                continue
+            over_cap = factor > cap
+            # Qt.ItemFlag 직접 조작 대신 모델 flags로 비활성화
+            item_flags = combo.model().item(i).flags()
+            from PySide6.QtCore import Qt
+            if over_cap:
+                combo.model().item(i).setFlags(
+                    item_flags & ~Qt.ItemFlag.ItemIsEnabled
+                )
+                combo.model().item(i).setToolTip(
+                    f"{factor:.2f}x는 {self._base_fps:.0f}fps GIF에서 20ms 미만 "
+                    f"(상한 {cap:.2f}x)으로 뷰어 역전 위험. 슬로우/등속을 권장합니다."
+                )
+            else:
+                combo.model().item(i).setFlags(
+                    item_flags | Qt.ItemFlag.ItemIsEnabled
+                )
+                combo.model().item(i).setToolTip("")
 
     # ------------------------------------------------------------------
     # 위젯 팩토리 (private)

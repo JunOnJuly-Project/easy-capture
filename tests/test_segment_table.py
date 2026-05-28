@@ -438,11 +438,11 @@ class TestRowsToSegments:
 class TestDynamicFastCap:
     """dynamic_fast_cap(base_fps) -> float: GIF 패스트 상한 계산 계약.
 
-    공식: min(ABSOLUTE_CAP, base_fps × 0.02)
-    WHY: duration = 1000/fps/factor ≥ 20ms
-         → factor ≤ 1000/(fps × 20) = fps × 0.02 / 1.0
-         (reviewer 지적: duration≥20ms 보장 공식)
-         절대 상한 4.0 클램프로 SpeedSegment 검증과 정합.
+    공식: min(ABSOLUTE_CAP, 50 / base_fps)
+    WHY: duration_ms = (1000/fps) / factor ≥ 20ms
+         → factor ≤ 1000 / (fps × 20) = 50 / fps
+         50 = 1000ms ÷ GIF_DURATION_CLAMP_MS(20ms).
+         절대 상한 4.0 클램프로 SpeedSegment FACTOR_MAX와 정합.
     """
 
     def test_base_12fps에서_패스트_상한이_절대상한에_클램프된다(self):

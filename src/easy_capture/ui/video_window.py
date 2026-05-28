@@ -77,6 +77,11 @@ _DEFAULT_SPAN_END = 60
 _MAX_ESTIMATE_SECONDS = 300   # fps 있는 경우 추정 상한 (초)
 _DEFAULT_FRAME_LIMIT = 3000   # fps 없는 경우 관대한 상한 (프레임)
 
+# 폭증 경고 임계: 예상 출력 프레임이 원본의 이 배수를 초과하면 경고
+# WHY: 계획서 §7 "기존 ×3 임계" — 3배 슬로우모션 구간이 전체를 차지할 때 상한.
+#      사용자에게 인코딩 시간/용량 폭증을 미리 안내한다.
+_FRAME_COUNT_OVERFLOW_RATIO: float = 3.0
+
 
 class _TrackWorker(QThread):
     """VideoCaptureUseCase.track을 백그라운드에서 실행하는 워커.
@@ -380,13 +385,15 @@ class VideoMainWindow(QMainWindow):
             QMessageBox.critical(self, "파일 열기 실패", f"파일을 열 수 없습니다.\n{exc}")
 
     def _apply_source_fps(self, meta) -> None:
-        """fps 입력 기본값을 원본 영상 fps로 설정한다(사용자가 spin으로 조절 가능).
+        """fps 입력 기본값을 원본 영상 fps로 설정하고 동적 패스트 상한을 갱신한다.
 
         WHY: 기본 12fps 고정이면 원본(예 25fps)과 달라 매번 수동 입력해야 한다.
              원본 fps를 기본으로 두면 '원본과 동일'이 기본이고 조절은 그대로 가능.
+             set_base_fps로 SegmentTableWidget의 패스트 상한 ComboBox 비활성화 연결.
         """
         if meta.fps and meta.fps > 0:
             self._fps_spin.setValue(round(meta.fps))
+            self._segment_table.set_base_fps(meta.fps)
 
     def _on_span_changed(self) -> None:
         """구간 변경 시 첫 프레임 미리보기를 갱신한다."""
@@ -465,14 +472,26 @@ class VideoMainWindow(QMainWindow):
             self._set_status("추적에 실패했습니다. 다시 시도해 주세요.")
 
     def _on_frame_to_start(self) -> None:
-        """현재 미리보기 구간 시작 프레임을 구간 테이블 선택 행의 시작으로 주입한다."""
-        frame_idx = self._span_start.value()
-        self._segment_table.set_frame_as_start(frame_idx)
+        """현재 미리보기 구간 첫 프레임(상대 0)을 선택 행의 시작으로 주입한다.
+
+        WHY 상대 인덱스:
+            export 경로의 segments는 read_span_frames(span)로 자른 crops의
+            상대 인덱스 [0, n) 기준이다(build_playback_schedule(len(crops), ...)).
+            절대 인덱스를 주입하면 span_start ≠ 0일 때 구간이 완전히 빗나간다.
+            현재 미리보기 = span 첫 프레임 → 상대 0이 항상 옳다.
+        """
+        self._segment_table.set_frame_as_start(0)
 
     def _on_frame_to_end(self) -> None:
-        """현재 미리보기 구간 끝 프레임을 구간 테이블 선택 행의 끝으로 주입한다."""
-        frame_idx = self._span_end.value()
-        self._segment_table.set_frame_as_end(frame_idx)
+        """현재 구간 길이(span_end - span_start)를 선택 행의 끝으로 주입한다.
+
+        WHY 상대 인덱스:
+            상대 끝 = span 전체 길이 = span_end - span_start (= n).
+            절대 인덱스(span_end)를 주입하면 crops 배열 범위를 벗어난다.
+        """
+        span_len = self._span_end.value() - self._span_start.value()
+        relative_end = max(span_len, 0)
+        self._segment_table.set_frame_as_end(relative_end)
 
     def _on_aspect_changed(self, index: int) -> None:
         """종횡비 변경 시 박스 즉시 재계산(재추적 없음)."""
@@ -514,6 +533,8 @@ class VideoMainWindow(QMainWindow):
         gap_policy = _GAP_POLICY_ITEMS[self._gap_combo.currentIndex()][1]
         config = VideoExportConfig(fmt=fmt, fps=fps, gap_policy=gap_policy, segments=segments)
 
+        if segments:
+            self._warn_frame_count_overflow_if_needed(fps, segments)
         if fmt == "gif" and segments:
             self._warn_gif_clamp_if_needed(fps, segments)
 
@@ -632,6 +653,33 @@ class VideoMainWindow(QMainWindow):
                 f"구간 설정에 오류가 있습니다.\n\n{exc}",
             )
             return None
+
+    def _warn_frame_count_overflow_if_needed(self, fps: float, segments) -> None:
+        """슬로우 구간으로 인한 출력 프레임 수 폭증 시 경고를 표시한다.
+
+        WHY: 다중 슬로우 구간 → 복제 프레임이 정수배 증가 → 인코딩 시간·용량 폭증.
+             estimate_output_frame_count로 사전 계산해 ×3 초과 시 안내한다(계획서 §7).
+             저장을 차단하지 않고 경고만 표시 — 사용자가 판단한다.
+        """
+        if self._frames is None:
+            return
+        n_original = len(self._frames)
+        if n_original == 0:
+            return
+        n_estimated = estimate_output_frame_count(n_original, segments, fps)
+        ratio = n_estimated / n_original
+        if ratio >= _FRAME_COUNT_OVERFLOW_RATIO:
+            self._set_status(
+                f"경고: 출력 프레임 수 {n_estimated}개 (원본의 {ratio:.1f}배) — 용량/시간 폭증"
+            )
+            QMessageBox.warning(
+                self,
+                "출력 프레임 폭증 경고",
+                f"슬로우모션 구간 적용 시 출력 프레임이 {n_estimated}개로\n"
+                f"원본({n_original}개)의 {ratio:.1f}배가 됩니다.\n\n"
+                "인코딩 시간과 파일 용량이 크게 늘어날 수 있습니다.\n"
+                "구간 설정을 줄이거나 저속 배속을 높여 주세요.",
+            )
 
     def _warn_gif_clamp_if_needed(self, fps: float, segments) -> None:
         """GIF 출력 시 20ms 클램프 대상 프레임이 있으면 경고를 표시한다.
