@@ -2,6 +2,6 @@
 
 UI는 이 레이어만 호출한다. core/infra 구체 타입에 의존하지 않는다(DIP).
 """
-from easy_capture.app.image_capture import CropRequest, ImageCaptureUseCase
+from easy_capture.app.image_capture import CropRequest, EmptyMaskError, ImageCaptureUseCase
 
-__all__ = ["CropRequest", "ImageCaptureUseCase"]
+__all__ = ["CropRequest", "EmptyMaskError", "ImageCaptureUseCase"]

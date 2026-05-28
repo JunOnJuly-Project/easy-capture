@@ -24,6 +24,14 @@ from easy_capture.core.segmentation.backend import SegmentationBackend
 from easy_capture.infra.video_io import FrameSource
 
 
+class EmptyMaskError(Exception):
+    """세그멘테이션 결과 마스크가 비어 있을 때 발생한다.
+
+    WHY: 조용한 폴백(클릭 좌표 대체) 대신 명시적 예외로 호출자에게 알린다.
+         UI 워커가 이를 잡아 한국어 안내 메시지를 표시한다(계획서 §8).
+    """
+
+
 @dataclass(frozen=True)
 class CropRequest:
     """크롭 요청 파라미터.
@@ -73,9 +81,11 @@ class ImageCaptureUseCase:
         mask = self._backend.segment_image(frame, points=[request.point])
         centroid = centroid_of_mask(mask)
         if centroid is None:
-            # WHY: 빈 마스크는 클릭이 배경에 맞았을 때 발생한다.
-            #      centroid가 없으면 클릭 좌표 자체를 중심으로 대체한다.
-            centroid = (float(request.point[0]), float(request.point[1]))
+            # WHY: 폴백하지 않고 예외를 올린다(계획서 §8, 리뷰 [중요] 1).
+            #      조용한 대체는 사용자가 배경 클릭인지 알 수 없게 만든다.
+            raise EmptyMaskError(
+                "대상을 인식하지 못했어요. 다시 클릭해 주세요."
+            )
         locked_w, locked_h = apply_aspect_lock(*request.box_size, request.aspect)
         return make_crop_box(centroid, (locked_w, locked_h), (w, h))
 

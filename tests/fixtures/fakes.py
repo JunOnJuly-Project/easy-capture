@@ -62,11 +62,16 @@ class FakeBackend:
     segment_image는 입력 프레임 크기에 맞춘 결정적 더미 마스크를 반환한다.
     - 클릭 포인트(points)가 주어지면 그 주변 사각형
     - 포인트가 없으면 프레임 중앙 사각형
+    - empty_mask=True이면 픽셀이 전부 False인 빈 마스크를 반환(빈 마스크 경로 테스트용)
     """
 
-    def __init__(self, device: str = "cpu") -> None:
-        """device 속성 보관 (Protocol 요구사항)."""
+    def __init__(self, device: str = "cpu", empty_mask: bool = False) -> None:
+        """device 속성 보관 (Protocol 요구사항).
+
+        empty_mask: True이면 항상 빈 마스크 반환 — EmptyMaskError 경로 테스트용.
+        """
         self.device = device
+        self._empty_mask = empty_mask
 
     def segment_image(
         self,
@@ -78,9 +83,14 @@ class FakeBackend:
 
         Given: RGB HxWx3 프레임 + 선택적 클릭 포인트
         When:  포인트가 있으면 첫 번째 포인트 주변, 없으면 프레임 중앙
+        When:  empty_mask=True이면 전부 False인 빈 마스크
         Then:  bool dtype, 프레임과 동일한 (H, W) shape
         """
         h, w = frame.shape[:2]
+
+        if self._empty_mask:
+            # WHY: 빈 마스크 → EmptyMaskError 경로를 테스트하기 위한 모드
+            return np.zeros((h, w), dtype=bool)
 
         if points is not None and len(points) > 0:
             # 첫 번째 클릭 포인트 사용 (x, y 순서)

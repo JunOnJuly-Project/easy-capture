@@ -40,10 +40,19 @@ class _SegWorker(QThread):
         self._request = request
 
     def run(self) -> None:
-        """make_crop_box를 워커 스레드에서 실행한다."""
+        """make_crop_box를 워커 스레드에서 실행한다.
+
+        EmptyMaskError는 한국어 안내 접두사로 구별해 UI에 전달한다.
+        WHY: main_window가 EmptyMaskError를 문자열 패턴이 아닌
+             의미론적으로 식별할 수 있도록 접두사 태그를 붙인다.
+        """
+        from easy_capture.app.image_capture import EmptyMaskError
+
         try:
             box = self._usecase.make_crop_box(self._frame, self._request)
             self.box_ready.emit(box)
+        except EmptyMaskError as exc:
+            self.error.emit(f"[빈마스크] {exc}")
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"세그멘테이션 오류: {exc}")
 
@@ -154,8 +163,12 @@ class ImageMainWindow(QMainWindow):
         self._set_status(f"크롭 박스 확정: {box}. '저장' 버튼으로 내보내세요.")
 
     def _on_seg_error(self, message: str) -> None:
-        """세그멘테이션 실패 시 한국어 안내."""
-        if "빈 마스크" in message or "대상을 인식" in message:
+        """세그멘테이션 실패 시 한국어 안내.
+
+        WHY: 워커가 [빈마스크] 태그로 EmptyMaskError를 구별해 전달한다.
+             문자열 패턴 매칭 대신 명시적 태그로 분기해 오탐을 방지한다.
+        """
+        if message.startswith("[빈마스크]"):
             self._set_status("대상을 인식하지 못했어요. 피사체 위를 다시 클릭해 주세요.")
         else:
             QMessageBox.warning(self, "분석 실패", message)

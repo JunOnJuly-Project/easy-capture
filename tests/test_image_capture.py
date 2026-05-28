@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from easy_capture.app.image_capture import CropRequest, ImageCaptureUseCase
+from easy_capture.app.image_capture import CropRequest, EmptyMaskError, ImageCaptureUseCase
 from easy_capture.core.crop import (
     apply_aspect_lock,
     centroid_of_mask,
@@ -475,3 +475,66 @@ class TestEndToEndHappyPath:
         assert w > 0 and h > 0
         # 9:16 종횡비 확인 (짝수 정렬 오차 ±2 허용)
         assert w * 16 <= h * 9 + 2, f"9:16 종횡비 위반: w={w}, h={h}"
+
+
+# ---------------------------------------------------------------------------
+# 빈 마스크 → EmptyMaskError 테스트 (리뷰 [중요] 1 반영)
+# ---------------------------------------------------------------------------
+class TestEmptyMaskError:
+    """빈 마스크일 때 폴백 없이 EmptyMaskError를 발생시키는지 검증."""
+
+    def test_빈_마스크_반환_시_EmptyMaskError가_발생한다(self):
+        """Given: empty_mask=True인 FakeBackend (항상 빈 마스크 반환)
+        When:  make_crop_box 호출
+        Then:  EmptyMaskError 발생 (조용한 폴백 없음)
+        """
+        usecase = ImageCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=FakeBackend(empty_mask=True),
+        )
+        frame = FakeFrameSource().read_frame()
+        request = CropRequest(
+            point=(CLICK_X, CLICK_Y),
+            box_size=(REQUEST_CROP_W, REQUEST_CROP_H),
+            aspect=None,
+        )
+
+        with pytest.raises(EmptyMaskError):
+            usecase.make_crop_box(frame, request)
+
+    def test_EmptyMaskError_메시지는_한국어_안내를_포함한다(self):
+        """Given: 빈 마스크 백엔드
+        When:  make_crop_box 호출 시 예외 발생
+        Then:  예외 메시지에 한국어 안내 포함
+        """
+        usecase = ImageCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=FakeBackend(empty_mask=True),
+        )
+        frame = FakeFrameSource().read_frame()
+        request = CropRequest(
+            point=(CLICK_X, CLICK_Y),
+            box_size=(REQUEST_CROP_W, REQUEST_CROP_H),
+        )
+
+        with pytest.raises(EmptyMaskError, match="다시 클릭"):
+            usecase.make_crop_box(frame, request)
+
+    def test_정상_마스크에서는_예외가_발생하지_않는다(self):
+        """Given: 일반 FakeBackend (정상 마스크)
+        When:  make_crop_box 호출
+        Then:  예외 없이 박스 반환
+        """
+        usecase = ImageCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=FakeBackend(),
+        )
+        frame = FakeFrameSource().read_frame()
+        request = CropRequest(
+            point=(CLICK_X, CLICK_Y),
+            box_size=(REQUEST_CROP_W, REQUEST_CROP_H),
+        )
+
+        box = usecase.make_crop_box(frame, request)
+
+        assert len(box) == 4

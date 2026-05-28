@@ -19,9 +19,6 @@ class Sam2ImageBackend:
     클릭 포인트 → bool HxW 마스크를 반환한다.
     """
 
-    # 다중 마스크 중 best score 인덱스
-    _BEST_MASK_IDX: int = 0
-
     def __init__(self, repo: str, device: str) -> None:
         """repo·device 보관만. 모델은 아직 로드하지 않는다(지연).
 
@@ -117,18 +114,21 @@ class Sam2ImageBackend:
     def _to_mask(self, outputs, height: int, width: int, inputs) -> np.ndarray:
         """post_process_masks 결과를 bool HxW ndarray로 정규화한다.
 
-        WHY: transformers post_process_masks는 배치 단위 텐서를 반환하므로
-             [0]으로 배치 차원을 제거하고, 최고 점수 마스크(인덱스 0)를
-             선택해 bool 배열로 변환한다. core와의 계약: bool HxW.
+        WHY: SAM2 multimask 출력(num_masks=3)의 순서는 IoU score 정렬을
+             보장하지 않는다(리뷰 [중요] 2). iou_scores argmax로
+             실제 best mask를 선택한다.
+             iou_scores shape: (batch_size, point_batch_size, num_masks)
+             → [0, 0, :].argmax() 로 마스크 인덱스 결정.
+        core와의 계약: bool HxW ndarray.
         """
-        import torch
-
         original_sizes = inputs["original_sizes"]
         masks = self._processor.post_process_masks(
             outputs.pred_masks,
             original_sizes=original_sizes,
         )
-        # masks[0]: (num_objects, num_masks, H, W) → 첫 오브젝트 첫 마스크 선택
-        best_mask = masks[0][0][self._BEST_MASK_IDX]
+        # iou_scores: (batch=1, point_batch=1, num_masks) → best 인덱스 선택
+        best_idx = int(outputs.iou_scores[0, 0].argmax())
+        # masks[0]: (num_objects, num_masks, H, W) → 첫 오브젝트의 best 마스크
+        best_mask = masks[0][0][best_idx]
         mask_np = best_mask.cpu().numpy() if hasattr(best_mask, "cpu") else np.asarray(best_mask)
         return mask_np.astype(bool)
