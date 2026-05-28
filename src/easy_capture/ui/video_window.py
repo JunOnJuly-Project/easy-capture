@@ -333,7 +333,11 @@ class VideoMainWindow(QMainWindow):
         self._track_worker.start()
 
     def _on_track_ready(self, result) -> None:
-        """추적 결과 도착 시 박스 재계산 + 저장 버튼 활성화."""
+        """추적 결과 도착 시 박스 재계산 + 저장 버튼 활성화.
+
+        needs_correction 구간이 있으면 한국어 안내를 상태바에 표시한다.
+        WHY: 수동 교정 UI는 다음 슬라이스(플래그 표시만 — 계획서 §1, ADR 0006).
+        """
         self._track_result = result
         self._recompute_boxes()
         self._aspect_combo.setEnabled(True)
@@ -342,9 +346,9 @@ class VideoMainWindow(QMainWindow):
         self._fmt_combo.setEnabled(True)
         self._fps_spin.setEnabled(True)
         self._save_btn.setEnabled(True)
-        self._set_status(
-            f"추적 완료 — {len(result.masks)}프레임. '저장'으로 GIF/MP4를 만들어 주세요."
-        )
+
+        status = _build_track_status(result)
+        self._set_status(status)
 
     def _on_track_error(self, message: str) -> None:
         """추적 실패 시 한국어 안내."""
@@ -486,6 +490,26 @@ class VideoMainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
+
+def _build_track_status(result) -> str:
+    """TrackResult로부터 상태바 메시지를 생성한다.
+
+    needs_correction 구간이 있으면 한국어 안내를 포함한다.
+    WHY: 수동 교정 UI는 다음 슬라이스 — 이번은 플래그 표시만(계획서 §1).
+    """
+    n_frames = len(result.masks)
+    n_cuts = len(getattr(result, "cut_frames", []))
+    needs_correction = getattr(result, "needs_correction", [])
+    n_fail = sum(1 for nc in needs_correction if nc)
+
+    base = f"추적 완료 — {n_frames}프레임"
+    if n_cuts > 0:
+        base += f", {n_cuts}개 컷 감지"
+    if n_fail > 0:
+        base += f" / 일부 구간 재매칭 실패 — 교정 필요"
+    base += ". '저장'으로 GIF/MP4를 만들어 주세요."
+    return base
+
 
 def _estimate_frame_count(meta) -> int:
     """FrameMeta에서 총 프레임 수를 추정한다.
