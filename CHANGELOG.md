@@ -7,6 +7,16 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
 ## [미출시]
 
 ### 추가
+- **비디오(움짤) 모드 첫 수직 슬라이스 — 코드** (`feature/video/tracking-slice`)
+  - 단일 샷 구간에서 클릭 대상을 추적해 크롭한 GIF/MP4 생성(척추 관통). 샷경계 재추적·Grounding DINO·오디오·업스케일 결합은 후속 슬라이스.
+  - `core/segmentation/video_backend`: `VideoSegmentationBackend` Protocol(이미지와 분리·ISP, opaque session, ADR 0010).
+  - `infra/sam2_video_backend`: `Sam2VideoBackend` — transformers `Sam2VideoModel`/`Sam2VideoProcessor`, 지연 로드. `post_process_masks`에 원본 해상도 전달(마스크 좌표 정합).
+  - `app/video_capture`: `VideoCaptureUseCase` — `track`(전파=무거움, 워커 1회)/`compute_boxes`(순수=가벼움, 재추적 없이 즉시 갱신) 분리. 고정 box size 불변식. `propagate_call_count==1` 회귀 가드.
+  - `core/export/video_export`: GIF/MP4 인코딩(imageio 지연 import, `macro_block_size=1`로 크롭 크기 보존, ADR 0011).
+  - `infra/video_io`: 구간 프레임 시퀀스 추출(`FrameSpan`/`read_frames`) 확장.
+  - `ui/video_window` + router 'gif' 분기: 구간 선택→클릭→추적(`_TrackWorker`)→미리보기→저장(`_ExportWorker`).
+  - 테스트 216개 통과. ADR 0010·0011 추가. 코드 리뷰 [중요] 3건 반영.
+  - **주의**: SAM2 video 실추론은 GPU 필요 → Colab 검증 후행(CPU 코드·Fake 테스트만 완료).
 - **이미지 모드 업스케일(SwinIR)** (`feature/image/upscale`)
   - 크롭 결과를 저장 전 초해상도 업스케일(옵션, 배율 x2/x4=모델 선택).
   - `core/upscale`: `UpscaleBackend` Protocol(torch 비의존) + `reconstruction_to_rgb_uint8` 순수 정규화 함수(모델 출력 CHW float→RGB uint8, 검증 리스크 격리).

@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-28 (이미지 모드 업스케일(SwinIR) 완료 — 이미지 모드 기능 일단락)
+> 최종 업데이트: 2026-05-28 (비디오 모드 첫 수직 슬라이스 코드 완료 — Colab GPU 실추론 검증 대기)
 
 ---
 
@@ -47,7 +47,7 @@ python -m easy_capture                    # 시작 화면(모드 선택)
 ### 2-4. 동작 확인 (smoke test)
 
 ```bash
-.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 166개)
+.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 216개)
 ```
 
 GPU 비디오 추적 검증은 `poc/colab/` 노트북(Colab GPU).
@@ -73,7 +73,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`feature/image/upscale` (이미지 모드 업스케일 완료 — 이미지 모드 기능 일단락, 비디오 모드 대기)
+`feature/video/tracking-slice` (비디오 모드 첫 슬라이스 코드 완료 — Colab GPU 실추론 검증 대기)
 
 ### 완료 ✅
 
@@ -89,14 +89,16 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 | 구현 | **이미지 모드 첫 수직 슬라이스**(`feature/image/capture-slice`): end-to-end happy path — 파일→프레임→클릭→SAM2(CPU)→크롭→PNG/JPG. 신규 모듈: `core/export`(crop_array/save_image, Pillow), `infra/video_io`(FrameSource Protocol·FrameMeta·open_source, 이미지=Pillow·영상=PyAV 첫프레임), `infra/sam2_image_backend`(Sam2ImageBackend, transformers 5.9.0 Sam2Model/Sam2Processor, 지연 로드, CPU), `app/image_capture`(ImageCaptureUseCase·CropRequest·EmptyMaskError), `app/router`(AppRouter 조립 루트), `ui/coords`(좌표 변환 순수함수), `ui/frame_canvas`, `ui/main_window`(워커 스레드 비블로킹). **테스트 71개 통과**(기존 20 포함). ADR 0008(app 유스케이스 레이어) 추가. 코드 리뷰 [중요] 4건 전원 반영. | ✅ |
 | 구현 | **이미지 모드 크롭 UX 확장**(`feature/image/crop-ux`): 종횡비 프리셋 UI(자유/1:1/9:16/16:9) + 크롭 크기 슬라이더 + 마스크 오버레이 표시. **핵심: 세그(무거움)/박스계산(가벼움) 분리** — `ImageCaptureUseCase.segment`(SAM2 1회, 워커)/`compute_box`(순수, 재세그 없음), `SegmentResult`·`BoxParams`. `ui/sizing`(crop_ratio_to_size), `frame_canvas.mask_to_rgba`(numpy 벡터화, 픽셀 루프 제거). **테스트 137개 통과**(재세그 카운터 회귀 가드 포함). 코드 리뷰 [중요] 2건 반영. | ✅ |
 | 구현 | **이미지 모드 업스케일(SwinIR)**(`feature/image/upscale`): 크롭 결과 초해상도 옵션. `core/upscale`(UpscaleBackend Protocol + `reconstruction_to_rgb_uint8` 순수 정규화, torch 비의존), `infra/swin2sr_upscale_backend`(Swin2SR, transformers, 지연 로드, processor 8배수 패딩 보정 재크롭), `export(upscaler=None)` 옵션 주입(무회귀), router `UPSCALE_MODELS` 카탈로그, UI 업스케일 체크박스·배율 콤보 + `_UpscaleSaveWorker`(백그라운드). **테스트 166개 통과**. ADR 0009 추가. 코드 리뷰 [중요] 3건 반영. | ✅ |
+| 구현 | **비디오 모드 첫 수직 슬라이스(코드)**(`feature/video/tracking-slice`): 단일 샷 구간 추적→크롭→GIF/MP4. `core/segmentation/video_backend`(VideoSegmentationBackend Protocol, ISP·opaque session, ADR 0010), `infra/sam2_video_backend`(SAM2 video, 지연 로드, PoC 패턴), `app/video_capture`(track 무거움/compute_boxes 순수 분리, 고정 box size 불변식, propagate 1회 가드), `core/export/video_export`(GIF/MP4 imageio, ADR 0011), `infra/video_io` 구간 추출, `ui/video_window`(_TrackWorker/_ExportWorker). **테스트 216개 통과**. ADR 0010·0011 추가. 코드 리뷰 [중요] 3건 반영. **🔴 SAM2 video 실추론은 Colab GPU 검증 미완(CPU 코드·Fake 테스트만 완료)**. | ⏳ |
 
 ### 🔴 블로커
 - **GPU(CUDA) 사실상 필수**: PoC 실측상 SAM2 추적이 **CPU 에서 ≈0.10 fps**(프레임당 ~10초, 6초 클립에 ~14분). 현재 개발 PC 는 CPU 전용 → **실영상 추적·재추적 검증과 실사용에 GPU 환경 필요**. 하드웨어/클라우드 방향 결정 대기.
 
 ### 미완료 (다음 작업 순서) ⏳
-1. **SAM2+업스케일 실모델 CPU 수동 스모크**: "2-4 동작 확인" 절차로 `python -m easy_capture` → 이미지 열기 → 클릭(SAM2 다운로드/추론) → 종횡비/크기 조정 → (업스케일 체크) 저장까지 직접 확인. **업스케일 저장 크기 = 크롭 × 배율** 단언(Swin2SR processor 패딩 보정 검증).
-2. **비디오 모드 슬라이스 (GPU)**: SAM2 video 백엔드 + tracking + 샷경계 재추적 + GIF/MP4 export. 로컬 검증은 `poc/colab/easy_capture_gpu_poc.ipynb`(Colab GPU). PoC H1 추적 유지율(AC-01 ≥80%)·H2 컷 재매칭(AC-03 ≥70%)·GPU fps(AC-06) 측정 → `poc/REPORT.md` 미검증 항목 채우기.
-3. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux`·`feature/image/upscale` → main PR/머지.
+1. **🔴 비디오 모드 Colab GPU 검증 (최우선)**: 비디오 첫 슬라이스 코드는 완료됐으나 SAM2 video 실추론은 미검증. `poc/colab/`에서 `Sam2VideoBackend` 경로로 짧은 군무 MV 클립 추적→크롭→GIF/MP4 검증. **특히 리뷰 [중요]1 수정(`post_process_masks` 원본 해상도) 실효 확인** — centroid가 원본 좌표계와 일치하는지. PoC H1 유지율(AC-01 ≥80%)·GPU fps(AC-06) 측정 → `poc/REPORT.md` 채우기.
+2. **SAM2+업스케일 이미지 모드 CPU 수동 스모크**: "2-4 동작 확인" 절차로 `python -m easy_capture` → 이미지 → 클릭 → 종횡비/크기 → (업스케일) 저장. 업스케일 저장 크기 = 크롭 × 배율 단언.
+3. **비디오 후속 슬라이스**: 샷경계 감지+재추적(ADR 0006 + `rematch.py`) → Grounding DINO 재매칭 → occlusion gap UI(CUT/FREEZE) → 오디오 동기(H4) → 업스케일 결합 → 타임라인 고도화.
+4. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux`·`feature/image/upscale`·`feature/video/tracking-slice` → main PR/머지.
 
 ### PoC 핵심 결과 (요약)
 - SAM2(이미지+비디오)·Grounding DINO 는 **transformers 5.9.0 만으로** 사용 가능(별도 `sam2` 패키지 불필요).
@@ -124,6 +126,9 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 - [ ] (업스케일) `ui/main_window` `_on_upscale_toggled` `hasattr` 방어 — 죽은 분기 가능, 제거/주석
 - [ ] (업스케일) `ui/main_window` 업스케일 워커 중 슬라이더 조작 시 저장버튼 깜빡임 — 워커 중 재계산/재활성 억제
 - [ ] (업스케일) `tests/test_upscale.py` None 경로 미호출 검증이 간접적 — 직접 가드 보강
+- [ ] (비디오) `core/export/video_export` GIF `duration` 단위(초 vs ms) imageio 버전 확인 + 주석
+- [ ] (비디오) `infra/video_io._decode_span` step>1 시 인덱스 의미(샘플 순번) 주석 명시
+- [ ] (비디오) `app/video_capture._fallback_center` 첫 프레임 None 케이스 단위 테스트 추가
 
 ---
 
