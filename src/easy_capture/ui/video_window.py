@@ -79,12 +79,10 @@ class _TrackWorker(QThread):
          수 초 걸린다. 메인 스레드 실행 시 UI가 얼기 때문에 QThread로 분리.
          _SegWorker(이미지 모드) 패턴을 그대로 계승: Signal·run·예외 처리 동형.
 
-    배선 흐름([중요] 2 수정):
-      1. shot_detect.detect_cut_frames(video_path, start_frame, end_frame)으로
-         구간 내 컷 프레임 인덱스를 구한다(detector 있을 때만).
+    배선 흐름:
+      1. usecase.detect_cuts(video_path, span)으로 컷 프레임 인덱스를 구한다.
+         detector 없으면 None 반환 — usecase가 infra 위임 책임을 가진다.
       2. track(frames, point, cut_frames=...)으로 샷 경계 재추적을 실행한다.
-      WHY: shot_detect가 경로 기반이 됐으므로 파일 경로·구간 정보를
-           VideoMainWindow → _TrackWorker로 전달해야 한다.
     """
 
     track_ready = Signal(object)  # TrackResult
@@ -97,8 +95,8 @@ class _TrackWorker(QThread):
             usecase:    VideoCaptureUseCase 인스턴스.
             frames:     구간 전체 프레임 리스트.
             point:      클릭 좌표 (x, y).
-            video_path: 비디오 파일 경로(shot_detect 입력용, None이면 컷 감지 생략).
-            span:       FrameSpan(start, end) 구간(shot_detect 입력용).
+            video_path: 비디오 파일 경로(detect_cuts 입력용, None이면 컷 감지 생략).
+            span:       FrameSpan(start, end) 구간(detect_cuts 입력용).
         """
         super().__init__()
         self._usecase = usecase
@@ -108,11 +106,11 @@ class _TrackWorker(QThread):
         self._span = span
 
     def run(self) -> None:
-        """shot_detect → cut_frames → usecase.track을 워커 스레드에서 실행한다."""
+        """usecase.detect_cuts → usecase.track을 워커 스레드에서 실행한다."""
         from easy_capture.core.segmentation.video_backend import EmptyTrackError
 
         try:
-            cut_frames = self._detect_cuts()
+            cut_frames = self._resolve_cut_frames()
             result = self._usecase.track(self._frames, self._point, cut_frames=cut_frames)
             self.track_ready.emit(result)
         except EmptyTrackError as exc:
@@ -120,26 +118,15 @@ class _TrackWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"추적 오류: {exc}")
 
-    def _detect_cuts(self) -> list[int] | None:
-        """detector가 있고 파일 경로가 있으면 컷 프레임 인덱스를 구한다.
+    def _resolve_cut_frames(self) -> list[int] | None:
+        """video_path·span이 있으면 usecase.detect_cuts에 위임한다.
 
-        WHY: detector=None이면 컷 감지를 건너뛰어 단일 샷 경로로 폴백한다.
-             파일 경로·구간이 없으면(테스트·이미지 소스) 마찬가지로 None 반환.
+        WHY: infra.shot_detect 직접 호출(ui→infra 위반)을 제거하고
+             usecase 공개 API만 사용한다. video_path 없으면 단일 샷 폴백.
         """
         if self._video_path is None or self._span is None:
             return None
-        if getattr(self._usecase, "_detector", None) is None:
-            return None
-        try:
-            from easy_capture.infra.shot_detect import detect_cut_frames
-            return detect_cut_frames(
-                self._video_path,
-                start_frame=self._span.start,
-                end_frame=self._span.end,
-            )
-        except Exception:  # noqa: BLE001
-            # 컷 감지 실패 시 단일 샷 폴백 — 추적 자체를 막지 않는다
-            return None
+        return self._usecase.detect_cuts(self._video_path, self._span)
 
 
 class _ExportWorker(QThread):

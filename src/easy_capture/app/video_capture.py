@@ -121,6 +121,41 @@ class VideoCaptureUseCase:
         """소스 메타 정보를 반환한다(UI가 공개 API만 사용하도록 위임)."""
         return self._source.probe()
 
+    def detect_cuts(
+        self,
+        video_path: str,
+        span: FrameSpan,
+    ) -> list[int] | None:
+        """비디오 파일에서 구간 내 컷 경계 프레임 인덱스를 반환한다.
+
+        detector가 없으면 None을 반환해 단일 샷 경로로 폴백한다.
+        내부에서 infra.shot_detect에 위임하여 ui가 infra를 직접 호출하지 않도록 한다.
+
+        WHY: ui/video_window.py가 infra.shot_detect를 직접 호출하면
+             ui → infra 의존 위반(ADR 0008)이 된다. usecase 공개 메서드로
+             흡수해 ui는 usecase API에만 의존하도록 한다.
+             컷 감지 실패 시 None 반환 — 추적 자체를 막지 않는다.
+
+        Args:
+            video_path: 분석할 비디오 파일 경로.
+            span:       분석 구간(start, end).
+
+        Returns:
+            컷 경계 상대 프레임 인덱스 리스트, 또는 detector 없으면 None.
+        """
+        if self._detector is None:
+            return None
+        try:
+            from easy_capture.infra.shot_detect import detect_cut_frames
+            return detect_cut_frames(
+                video_path,
+                start_frame=span.start,
+                end_frame=span.end,
+            )
+        except Exception:  # noqa: BLE001
+            # 컷 감지 실패 시 단일 샷 폴백 — 추적 자체를 막지 않는다
+            return None
+
     def read_span_frames(self, span: FrameSpan) -> list[np.ndarray]:
         """구간 프레임 시퀀스를 추출해 반환한다(UI 공개 API)."""
         return self._source.read_frames(span)
