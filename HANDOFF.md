@@ -47,7 +47,7 @@ python -m easy_capture                    # 시작 화면(모드 선택)
 ### 2-4. 동작 확인 (smoke test)
 
 ```bash
-.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 367개)
+.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 379개)
 ```
 
 GPU 비디오 추적 검증은 `poc/colab/` 노트북(Colab GPU).
@@ -73,7 +73,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`main` (전 슬라이스 + 슬로우모션 Story 1·2·3 머지 — 367 테스트 통과). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). 다음: Story 4(export 결합) = `feature/app/export-timeremap`.
+`main` (전 슬라이스 + 슬로우모션 Story 1·2·3·4 머지 — 379 테스트 통과, **알파 마일스톤 S1+S2+S4 완성**: export로 슬로우 GIF/MP4 생성 가능). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). 다음: Story 5(UI 구간 테이블·미리보기 버튼) = `feature/ui/speed-segment-table`.
 
 ### 완료 ✅
 
