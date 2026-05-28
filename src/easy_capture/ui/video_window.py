@@ -349,11 +349,21 @@ class VideoMainWindow(QMainWindow):
             # WHY: usecase 공개 API probe_meta() 사용 — 비공개 _source 관통 금지(리뷰 [중요] 3)
             meta = self._usecase.probe_meta()
             self._total_frames = _estimate_frame_count(meta)
+            self._apply_source_fps(meta)
             self._setup_span_controls()
             self._load_first_frame()
             self._set_status("구간을 설정하고 피사체를 클릭해 주세요.")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "파일 열기 실패", f"파일을 열 수 없습니다.\n{exc}")
+
+    def _apply_source_fps(self, meta) -> None:
+        """fps 입력 기본값을 원본 영상 fps로 설정한다(사용자가 spin으로 조절 가능).
+
+        WHY: 기본 12fps 고정이면 원본(예 25fps)과 달라 매번 수동 입력해야 한다.
+             원본 fps를 기본으로 두면 '원본과 동일'이 기본이고 조절은 그대로 가능.
+        """
+        if meta.fps and meta.fps > 0:
+            self._fps_spin.setValue(round(meta.fps))
 
     def _on_span_changed(self) -> None:
         """구간 변경 시 첫 프레임 미리보기를 갱신한다."""
