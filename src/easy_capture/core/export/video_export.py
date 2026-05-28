@@ -20,6 +20,7 @@ from easy_capture.core.timing.timeremap import (
     SpeedSegment,
     build_playback_schedule,
     clamp_durations_for_gif,
+    schedule_to_cfr_indices,
 )
 
 
@@ -86,7 +87,8 @@ def encode_frames(
         duration_arg = _resolve_gif_durations(crops, config)
         _encode_gif(crops, path, duration_arg)
     else:
-        _encode_mp4(crops, path, config.fps)
+        remapped = _resolve_mp4_frames(crops, config)
+        _encode_mp4(remapped, path, config.fps)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +146,32 @@ def _resolve_gif_durations(
     )
     clamped, _ = clamp_durations_for_gif(schedule)
     return list(clamped.durations_ms)
+
+
+def _resolve_mp4_frames(
+    crops: list[np.ndarray],
+    config: VideoExportConfig,
+) -> list[np.ndarray]:
+    """MP4용 프레임 시퀀스를 결정한다 — segments 있으면 복제/드롭, 없으면 원본 반환.
+
+    segments=() → crops 그대로 반환 (무회귀).
+    segments 있음 → build_playback_schedule + schedule_to_cfr_indices 경유 후
+    복제/드롭된 프레임 리스트 반환.
+
+    WHY 별도 헬퍼: encode_frames 20줄 규칙 + 단일 책임 원칙 준수.
+                  GIF의 _resolve_gif_durations와 대칭 구조로 일관성 유지.
+    WHY MP4 CFR 방식: MP4는 GIF와 달리 프레임별 delay 지정 불가.
+                     속도 변화는 프레임 복제(슬로우)·드롭(패스트)으로 표현한다.
+    """
+    if not config.segments:
+        # segments=() 경로: 기존 동작 불변 보장
+        return crops
+
+    schedule = build_playback_schedule(
+        len(crops), list(config.segments), config.fps
+    )
+    cfr_indices = schedule_to_cfr_indices(schedule)
+    return [crops[i] for i in cfr_indices]
 
 
 def _encode_gif(
