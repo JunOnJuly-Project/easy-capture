@@ -441,3 +441,88 @@ class TestGapPolicyFrameSelection:
         assert len(crops) == half, (
             f"CUT 정책 crop 수 불일치: {len(crops)} vs {half}"
         )
+
+
+# ---------------------------------------------------------------------------
+# GIF duration 밀리초 회귀 가드
+# ---------------------------------------------------------------------------
+# GIF centisecond(10ms) 해상도 허용 오차
+_GIF_DURATION_TOLERANCE_MS = 10
+
+# 회귀 가드용 fps 값들
+_GIF_REGRESSION_FPS_12 = 12.0    # duration ≈ 83ms (이전 버그: ≈0.083 초 단위 혼동)
+_GIF_REGRESSION_FPS_10 = 10.0    # duration = 100ms
+
+
+class TestGifDurationMs:
+    """GIF 재생속도 회귀 가드: encode_frames의 duration 단위가 ms인지 검증.
+
+    WHY: imageio 2.28+ 에서 GIF duration 단위가 '초'→'밀리초'로 변경됐다.
+         이전 구현에서 1/fps(초)를 그대로 넣어 재생속도가 ≈100배 느렸다
+         (≈0.083을 ms로 해석 → 거의 0ms → 뷰어 기본 100ms 적용).
+         수정 후에는 1000/fps(ms)를 넣어야 하며, 이 테스트가 회귀를 방지한다.
+
+    GIF 스펙: delay 필드는 centisecond(10ms) 단위이므로 ±10ms 허용.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_EXPORT, reason=_MSG_NOT_IMPL)
+    def test_fps_12_GIF_duration이_밀리초_단위로_올바르다(self, tmp_path):
+        """Given: fps=12로 GIF 인코딩
+        When:  imageio.get_reader(path).get_meta_data()['duration'] 읽기
+        Then:  duration ≈ 1000/12 ≈ 83ms (±10ms)
+               이전 버그: ≈0.083ms — 뷰어가 기본 100ms(≈10fps)로 느리게 재생
+
+        WHY: fps=12 기대 duration=83ms. 이전 버그(초 단위) 시에는 ≈0으로
+             측정되어 뷰어가 기본값(100ms)을 쓴다. 수정 후에는 80~90ms 범위.
+        """
+        crops = crop_frames(
+            _make_synth_frames(), _make_crop_boxes()
+        )
+        config = VideoExportConfig(fmt="gif", fps=_GIF_REGRESSION_FPS_12)
+        output_path = str(tmp_path / "fps12.gif")
+
+        encode_frames(crops, output_path, config)
+
+        # GIF 메타데이터에서 duration 읽기
+        with imageio.get_reader(output_path) as reader:
+            meta = reader.get_meta_data()
+        duration_ms = meta.get("duration", None)
+
+        assert duration_ms is not None, "GIF 메타데이터에 duration 필드 없음"
+
+        # duration 단위 확인: ms 단위여야 함 (80~90ms 범위)
+        expected_ms = 1000.0 / _GIF_REGRESSION_FPS_12  # ≈ 83.3ms
+        assert abs(duration_ms - expected_ms) <= _GIF_DURATION_TOLERANCE_MS, (
+            f"GIF duration 불일치: {duration_ms}ms vs 기대 {expected_ms:.1f}ms "
+            f"(±{_GIF_DURATION_TOLERANCE_MS}ms). "
+            "1.0/fps(초 단위 버그) 적용 시 ≈0ms 또는 ≈100ms(뷰어 기본값)가 나온다."
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_EXPORT, reason=_MSG_NOT_IMPL)
+    def test_fps_10_GIF_duration이_밀리초_단위로_올바르다(self, tmp_path):
+        """Given: fps=10으로 GIF 인코딩
+        When:  메타데이터 duration 읽기
+        Then:  duration ≈ 1000/10 = 100ms (±10ms)
+
+        WHY: fps=10은 GIF centisecond 경계(10ms 배수)에 정확히 맞아
+             허용 오차 내에서 정밀하게 검증 가능하다.
+        """
+        crops = crop_frames(
+            _make_synth_frames(), _make_crop_boxes()
+        )
+        config = VideoExportConfig(fmt="gif", fps=_GIF_REGRESSION_FPS_10)
+        output_path = str(tmp_path / "fps10.gif")
+
+        encode_frames(crops, output_path, config)
+
+        with imageio.get_reader(output_path) as reader:
+            meta = reader.get_meta_data()
+        duration_ms = meta.get("duration", None)
+
+        assert duration_ms is not None, "GIF 메타데이터에 duration 필드 없음"
+
+        expected_ms = 1000.0 / _GIF_REGRESSION_FPS_10  # = 100.0ms
+        assert abs(duration_ms - expected_ms) <= _GIF_DURATION_TOLERANCE_MS, (
+            f"fps=10 GIF duration 불일치: {duration_ms}ms vs 기대 {expected_ms:.1f}ms "
+            f"(±{_GIF_DURATION_TOLERANCE_MS}ms)."
+        )

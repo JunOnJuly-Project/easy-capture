@@ -119,7 +119,10 @@ def _encode_gif(crops: list[np.ndarray], path: str, fps: float) -> None:
     """
     import imageio  # 지연 import — core 경계 불변식 유지
 
-    duration = 1.0 / fps if fps > 0 else 1.0 / 12.0
+    # WHY: imageio 2.28+ 에서 GIF duration 단위가 '초'→'밀리초'로 변경됐다.
+    #      초 값(1/fps≈0.083)을 넣으면 0에 가깝게 무효화돼 뷰어가 기본 100ms(≈10fps)로
+    #      느리게 재생한다. ms 로 변환해 fps 설정이 실제 재생속도에 반영되게 한다.
+    duration = 1000.0 / fps if fps > 0 else 1000.0 / 12.0
     with imageio.get_writer(path, mode="I", duration=duration, loop=0) as writer:
         for crop in crops:
             writer.append_data(crop)
