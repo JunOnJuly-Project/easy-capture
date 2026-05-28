@@ -10,6 +10,8 @@
   4. MP4 라운드트립     — imageio-ffmpeg 미설치 시 importorskip, 설치 시 파일·크기 검증
   5. 프레임 크기 불일치 예외 — 동일 크기 요구 위반 시 ValueError
   6. gap_policy 출력 인덱스 반영 — BACKGROUND/CUT 정책별 프레임 선택 검증
+  7. GIF duration ms 회귀 가드 — duration 단위 ms 검증
+  8. GIF per-frame duration 통합 (Story 2) — segments 가변 duration 검증
 
 구현 전 RED 상태가 정상: core/export/video_export.py 미구현.
 """
@@ -38,6 +40,27 @@ except ModuleNotFoundError:
     encode_frames = None  # type: ignore[assignment,misc]
     GapPolicy = None  # type: ignore[assignment,misc]
     _HAS_VIDEO_EXPORT = False
+
+# --- timeremap — Story 2 per-frame duration 통합 테스트용 ---
+# WHY: SpeedSegment·build_playback_schedule·clamp_durations_for_gif는
+#      timeremap 모듈에서 이미 구현됨. import 실패 시 Story 2 테스트만 skip.
+try:
+    from easy_capture.core.timing.timeremap import (
+        SpeedSegment,
+        build_playback_schedule,
+        clamp_durations_for_gif,
+    )
+    _HAS_TIMEREMAP = True
+except ModuleNotFoundError:
+    SpeedSegment = None  # type: ignore[assignment,misc]
+    build_playback_schedule = None  # type: ignore[assignment,misc]
+    clamp_durations_for_gif = None  # type: ignore[assignment,misc]
+    _HAS_TIMEREMAP = False
+
+_MSG_NO_TIMEREMAP = "easy_capture.core.timing.timeremap 미설치"
+_MSG_STORY2_NOT_IMPL = (
+    "Story 2 미구현 — VideoExportConfig.segments 또는 timeremap 미지원"
+)
 
 _MSG_NOT_IMPL = "easy_capture.core.export.video_export 미구현 — RED 예상"
 
@@ -526,3 +549,267 @@ class TestGifDurationMs:
             f"fps=10 GIF duration 불일치: {duration_ms}ms vs 기대 {expected_ms:.1f}ms "
             f"(±{_GIF_DURATION_TOLERANCE_MS}ms)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Story 2 — GIF per-frame duration 통합 (TDD RED)
+# ---------------------------------------------------------------------------
+# Story 2 테스트 상수 — 매직넘버 금지
+_S2_FPS = 12.0                          # 기준 fps (1프레임 균일 duration ≈ 83ms)
+_S2_N_FRAMES = 10                       # 총 프레임 수
+_S2_SLOW_START = 2                      # 슬로우 구간 시작 인덱스 (포함)
+_S2_SLOW_END = 5                        # 슬로우 구간 끝 인덱스 (미포함) → 프레임 2,3,4
+_S2_SLOW_FACTOR = 0.5                   # 슬로우 배속 (duration × 2배)
+_S2_FAST_FPS = 30.0                     # 패스트 클램프 테스트 기준 fps
+_S2_FAST_FACTOR = 4.0                   # 최대 패스트 → 30fps×4x → 8.3ms → 클램프
+_GIF_CENTISECOND_TOLERANCE_MS = 10      # GIF centisecond ±10ms 허용 오차
+_GIF_MIN_DURATION_MS = 10.0            # 클램프 하한
+_GIF_CLAMP_DURATION_MS = 20.0          # 클램프 목표값
+
+
+def _read_gif_frame_durations(gif_path: str) -> list[int]:
+    """PIL로 GIF를 프레임별 순회해 각 프레임의 duration(ms)을 리스트로 반환한다.
+
+    WHY PIL 사용:
+      imageio.get_reader()는 전체 메타데이터만 반환하거나 단일 duration 값을 준다.
+      PIL Image.seek(i) + info['duration']는 GIF 스펙상 프레임별 delay 필드를
+      각각 읽어줘 per-frame duration 검증에 유일하게 적합하다.
+    """
+    from PIL import Image
+
+    durations: list[int] = []
+    with Image.open(gif_path) as img:
+        for i in range(img.n_frames):
+            img.seek(i)
+            durations.append(img.info.get("duration", 0))
+    return durations
+
+
+def _make_synth_frames_n(n: int = _S2_N_FRAMES) -> list[np.ndarray]:
+    """Story 2용 n개 합성 크롭 프레임(32×24 RGB)을 반환한다."""
+    return _make_synth_frames(n=n, h=CROP_BOX_H, w=CROP_BOX_W)
+
+
+def _make_uniform_crops(n: int = _S2_N_FRAMES) -> list[np.ndarray]:
+    """n개 동일 크기(32×24) 합성 크롭 리스트를 반환한다.
+
+    WHY: Story 2 테스트는 crop_frames 과정 없이 바로 encode_frames에 넘길
+         수 있도록 이미 크롭된 프레임을 준비한다.
+    """
+    return _make_synth_frames_n(n)
+
+
+# Story 2 테스트 guard: video_export + timeremap 모두 존재해야 실행
+_STORY2_SKIP = not (_HAS_VIDEO_EXPORT and _HAS_TIMEREMAP)
+
+
+class TestGifVariableDuration:
+    """Story 2: GIF per-frame duration 통합 테스트.
+
+    VideoExportConfig.segments 필드 + encode_frames segments 분기 계약 검증.
+
+    TDD RED: 구현 전이므로 아래 테스트는 모두 실패(AttributeError 또는 TypeError)
+    예상됨. VideoExportConfig에 segments 필드가 없고 encode_frames가 segments를
+    무시하기 때문이다.
+    """
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_VideoExportConfig_segments_기본값이_빈_튜플이다(self):
+        """Given: 인자 없이 VideoExportConfig 생성
+        When:  segments 필드 접근
+        Then:  segments == () (빈 tuple, 기본값)
+
+        WHY: segments=() 는 "기존 균일 fps 경로"를 의미한다.
+             기본값이 빈 튜플이어야 기존 코드가 segments 지정 없이도 동작한다.
+        """
+        config = VideoExportConfig()
+
+        assert hasattr(config, "segments"), (
+            "VideoExportConfig에 segments 필드가 없음 — Task 2-1 미구현"
+        )
+        assert config.segments == (), (
+            f"segments 기본값 불일치: {config.segments!r} vs () (빈 tuple 기대)"
+        )
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_VideoExportConfig_segments_frozen_불변이다(self):
+        """Given: segments=(SpeedSegment(0,3,0.5),)로 생성된 VideoExportConfig
+        When:  segments 필드 수정 시도
+        Then:  FrozenInstanceError 또는 AttributeError 발생 (frozen dataclass)
+
+        WHY: VideoExportConfig는 frozen=True이므로 segments 포함 모든 필드가
+             불변이어야 한다. tuple 타입도 값 변경 불가를 보장한다.
+        """
+        seg = SpeedSegment(0, 3, _S2_SLOW_FACTOR)
+        config = VideoExportConfig(segments=(seg,))
+
+        with pytest.raises((AttributeError, TypeError)):
+            config.segments = ()  # type: ignore[misc]
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_segments_빈_튜플이면_기존_균일_duration_경로와_동일하다(self, tmp_path):
+        """Given: segments=()인 VideoExportConfig, fps=12, 10개 합성 크롭
+        When:  encode_frames(fmt='gif', segments=()) 호출 후 PIL로 프레임별 duration 읽기
+        Then:  모든 프레임 duration ≈ 1000/12 ≈ 83ms (±10ms)
+
+        WHY (무회귀): segments=() 경로는 기존 균일 fps 로직과 완전히 동일해야 한다.
+             Story 2 구현이 기존 GIF 라운드트립 테스트를 깨면 안 된다.
+        """
+        crops = _make_uniform_crops(_S2_N_FRAMES)
+        config = VideoExportConfig(fmt="gif", fps=_S2_FPS, segments=())
+        output_path = str(tmp_path / "uniform_no_segments.gif")
+
+        encode_frames(crops, output_path, config)
+
+        frame_durations = _read_gif_frame_durations(output_path)
+        expected_ms = 1000.0 / _S2_FPS  # ≈ 83.3ms
+
+        assert len(frame_durations) == _S2_N_FRAMES, (
+            f"GIF 프레임 수 불일치: {len(frame_durations)} vs {_S2_N_FRAMES}"
+        )
+        for i, dur in enumerate(frame_durations):
+            assert abs(dur - expected_ms) <= _GIF_CENTISECOND_TOLERANCE_MS, (
+                f"segments=() 균일 duration 불일치: 프레임 {i} → {dur}ms "
+                f"vs 기대 {expected_ms:.1f}ms (±{_GIF_CENTISECOND_TOLERANCE_MS}ms). "
+                "segments=() 경로가 기존 균일 fps 경로와 달라짐 — 무회귀 실패."
+            )
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_슬로우_구간_프레임_duration이_균일의_2배다(self, tmp_path):
+        """Given: 10개 크롭, segments=(SpeedSegment(2, 5, 0.5),), fps=12
+        When:  encode_frames(fmt='gif') 후 PIL로 프레임별 duration 읽기
+        Then:  프레임 2,3,4 duration ≈ (1000/12)/0.5 ≈ 166ms (±10ms)
+               프레임 0,1,5~9 duration ≈ 1000/12 ≈ 83ms (±10ms)
+
+        WHY: SlowMotion factor=0.5 → 표시시간 = base_duration / 0.5 = base × 2.
+             구간 내 프레임만 느려지고 구간 밖은 균일 속도를 유지해야 한다.
+             PIL seek(i) + info['duration']으로 프레임별 검증.
+        """
+        crops = _make_uniform_crops(_S2_N_FRAMES)
+        seg = SpeedSegment(_S2_SLOW_START, _S2_SLOW_END, _S2_SLOW_FACTOR)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S2_FPS, segments=(seg,)
+        )
+        output_path = str(tmp_path / "slow_segment.gif")
+
+        encode_frames(crops, output_path, config)
+
+        frame_durations = _read_gif_frame_durations(output_path)
+        base_ms = 1000.0 / _S2_FPS              # ≈ 83.3ms
+        slow_ms = base_ms / _S2_SLOW_FACTOR     # ≈ 166.6ms (factor=0.5 → 2배)
+        slow_frames = set(range(_S2_SLOW_START, _S2_SLOW_END))  # {2, 3, 4}
+
+        assert len(frame_durations) == _S2_N_FRAMES, (
+            f"슬로우 GIF 프레임 수 불일치: {len(frame_durations)} vs {_S2_N_FRAMES}"
+        )
+        for i, dur in enumerate(frame_durations):
+            if i in slow_frames:
+                assert abs(dur - slow_ms) <= _GIF_CENTISECOND_TOLERANCE_MS, (
+                    f"슬로우 구간 프레임 {i} duration 불일치: {dur}ms "
+                    f"vs 기대 {slow_ms:.1f}ms (±{_GIF_CENTISECOND_TOLERANCE_MS}ms). "
+                    f"factor={_S2_SLOW_FACTOR} → 2배 느린 duration 기대."
+                )
+            else:
+                assert abs(dur - base_ms) <= _GIF_CENTISECOND_TOLERANCE_MS, (
+                    f"균일 구간 프레임 {i} duration 불일치: {dur}ms "
+                    f"vs 기대 {base_ms:.1f}ms (±{_GIF_CENTISECOND_TOLERANCE_MS}ms). "
+                    "구간 밖 프레임은 균일 속도여야 함."
+                )
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_패스트_구간_10ms_미만_클램프되어_역전_없음(self, tmp_path):
+        """Given: 10개 크롭, segments=(SpeedSegment(0, 10, 4.0),), fps=30
+        When:  encode_frames(fmt='gif') 후 PIL로 프레임별 duration 읽기
+        Then:  모든 프레임 duration >= 20ms (10ms 미만 → 20ms 클램프)
+               원래 duration = 1000/30 / 4.0 ≈ 8.3ms < 10ms → 클램프 필요
+
+        WHY: 패스트×고fps → 8.3ms 는 GIF 10ms 하한 미만이다.
+             clamp_durations_for_gif 경유 후 20ms 클램프 적용으로
+             뷰어가 delay=0 해석해 ≈100ms로 느려지는 역전을 방지해야 한다.
+             20ms ≥ 10ms 이므로 역전(오히려 느려짐) 없음을 보장한다.
+        """
+        crops = _make_uniform_crops(_S2_N_FRAMES)
+        seg = SpeedSegment(0, _S2_N_FRAMES, _S2_FAST_FACTOR)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S2_FAST_FPS, segments=(seg,)
+        )
+        output_path = str(tmp_path / "fast_clamp.gif")
+
+        # 클램프 전 기대 duration 검증 (왜 클램프가 필요한지 명시)
+        raw_duration_ms = (1000.0 / _S2_FAST_FPS) / _S2_FAST_FACTOR  # ≈ 8.33ms
+        assert raw_duration_ms < _GIF_MIN_DURATION_MS, (
+            f"테스트 전제 조건 실패: raw_duration={raw_duration_ms:.1f}ms >= "
+            f"{_GIF_MIN_DURATION_MS}ms — 클램프 시나리오가 아님"
+        )
+
+        encode_frames(crops, output_path, config)
+
+        frame_durations = _read_gif_frame_durations(output_path)
+        for i, dur in enumerate(frame_durations):
+            assert dur >= _GIF_CLAMP_DURATION_MS, (
+                f"클램프 미적용: 프레임 {i} duration={dur}ms < "
+                f"{_GIF_CLAMP_DURATION_MS}ms. "
+                f"raw={raw_duration_ms:.1f}ms < 10ms → 20ms 클램프 기대."
+            )
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_segments_있어도_loop_0_무한루프_유지된다(self, tmp_path):
+        """Given: segments=(SpeedSegment(2,5,0.5),)인 GIF 인코딩
+        When:  PIL로 GIF 재로드
+        Then:  n_frames == _S2_N_FRAMES (프레임 소실 없음)
+               + imageio metadata loop == 0 또는 PIL info 루프 확인
+
+        WHY: segments 적용 후에도 GIF 무한 루프(loop=0) 설정이 유지되어야 한다.
+             encode_frames의 기존 loop=0 계약이 per-frame duration 경로에서도
+             동일하게 적용됨을 검증한다. 프레임 수 보존도 함께 확인한다.
+        """
+        crops = _make_uniform_crops(_S2_N_FRAMES)
+        seg = SpeedSegment(_S2_SLOW_START, _S2_SLOW_END, _S2_SLOW_FACTOR)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S2_FPS, segments=(seg,)
+        )
+        output_path = str(tmp_path / "loop_check.gif")
+
+        encode_frames(crops, output_path, config)
+
+        # PIL로 프레임 수 확인
+        from PIL import Image
+        with Image.open(output_path) as img:
+            n_frames_actual = img.n_frames
+            # PIL info에서 loop 정보 확인 (loop=0 = 무한 반복)
+            loop_value = img.info.get("loop", 0)
+
+        assert n_frames_actual == _S2_N_FRAMES, (
+            f"segments 있는 GIF 프레임 수 불일치: {n_frames_actual} vs {_S2_N_FRAMES}. "
+            "frame_indices=range(n)이므로 프레임 복제/드롭 없이 원본 순서 유지 기대."
+        )
+        # loop=0은 GIF 무한 루프를 의미한다 (표준 GIF89a 스펙)
+        assert loop_value == 0, (
+            f"GIF loop 값 불일치: {loop_value} vs 0 (무한 루프). "
+            "segments 적용 경로에서 loop=0이 유지되어야 한다."
+        )
+
+    @pytest.mark.skipif(_STORY2_SKIP, reason=_MSG_STORY2_NOT_IMPL)
+    def test_segments_겹침_입력_시_ValueError가_encode_frames에_전파된다(
+        self, tmp_path
+    ):
+        """Given: 겹치는 구간 segments=(SpeedSegment(0,5,0.5), SpeedSegment(3,8,2.0),)
+        When:  encode_frames(fmt='gif') 호출
+        Then:  ValueError 발생 (normalize_segments가 겹침 감지 → encode_frames 전파)
+
+        WHY: encode_frames가 segments 유무 분기에서 build_playback_schedule을
+             호출하면, normalize_segments의 겹침 ValueError가 그대로 전파되어야 한다.
+             encode_frames 내부에서 예외를 흡수·은폐하면 안 된다.
+        """
+        crops = _make_uniform_crops(_S2_N_FRAMES)
+        overlapping_segments = (
+            SpeedSegment(0, 5, _S2_SLOW_FACTOR),
+            SpeedSegment(3, 8, 2.0),   # 0~5와 3~8 겹침
+        )
+        config = VideoExportConfig(
+            fmt="gif", fps=_S2_FPS, segments=overlapping_segments
+        )
+        output_path = str(tmp_path / "overlap_error.gif")
+
+        with pytest.raises(ValueError):
+            encode_frames(crops, output_path, config)
