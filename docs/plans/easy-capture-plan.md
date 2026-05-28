@@ -31,7 +31,7 @@ scope creep 방지를 위해 v1.0 경계를 명시한다. Out 항목도 **아키
 | 컷 전환 | **샷 경계 감지(PySceneDetect) + 위치·클래스 기반 자동 재매칭 재추적** | 정밀 re-ID 네트워크 |
 | 교정 | **수동 교정**(미리보기 중 특정 프레임 재선택 → 부분 재추적) | — |
 | 크롭 | centroid 중심 + 떨림완화(기본 ON) + 종횡비 잠금(1:1/9:16/16:9/자유) | 워터마크 자동 회피 |
-| 갭 채우기 | 3방식(컷/배경/프리즈, 기본=컷) | — |
+| 갭 채우기 | 3방식(배경/컷/프리즈, 기본=BACKGROUND) | — |
 | 출력 | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(짝수해상도·yuv420p·오디오 패스through) | SNS 플랫폼별 자동 압축/포맷 변환 프리셋 |
 | 업스케일 | Real-ESRGAN/SwinIR 2종(2x/4x) 옵션 | temporal smoothing(플리커 저감), 직캠 왜곡보정 |
 | 다중 멤버 | 세션·디코드 캐시 재사용으로 반복 비용 완화 | 같은 구간 다중 멤버 배치 일괄 처리 |
@@ -45,7 +45,7 @@ scope creep 방지를 위해 v1.0 경계를 명시한다. Out 항목도 **아키
 |---|---|
 | 언어 | Python 3.10+ |
 | GUI | PySide6 (LGPL) |
-| 세그+추적 | SAM 2.1 (`facebook/sam2.1-hiera-*`, Apache 2.0), 공식 `sam2` video predictor |
+| 세그+추적 | SAM 2.1 (`facebook/sam2.1-hiera-*`, Apache 2.0), **`transformers>=5.9.0` 단독** (별도 `sam2` 패키지 불필요 — ADR 0001 보완) |
 | 클래스 검출 | Grounding DINO (`IDEA-Research/grounding-dino-tiny`, Apache 2.0) |
 | 샷 경계 감지 | PySceneDetect (BSD-3) |
 | 업스케일 | Real-ESRGAN(+basicsr) + SwinIR/Swin2SR (설정 선택) |
@@ -63,7 +63,7 @@ scope creep 방지를 위해 v1.0 경계를 명시한다. Out 항목도 **아키
 2. 오브젝트 식별 = 자동 검출 + 클릭. 동일 프레임 다중 인물은 후보 라벨링 후 **단일 선택**(동시 다중 추적 아님). 다른 멤버는 세션·디코드 캐시 유지 후 재선택 순차 처리(MVP), 배치는 v1.1.
 3. 추적 = SAM2 video predictor 단일 오브젝트 ID 전파.
 4. 샷 경계 + 재추적: PySceneDetect 컷 감지 → DINO 재검출 → 재매칭 점수 `w_pos·pos_sim + w_cls·cls_sim`(기본 0.7/0.3), 임계값 0.5 이상이면 SAM2 재초기화, 미만이면 사용자 확인. PoC 보정.
-5. occlusion + 갭 채우기: 소실 → 대기 카운터 → 재등장 시 계속, 초과 시 종료. 갭 3방식(기본=컷): 컷/배경 계속/프리즈.
+5. occlusion + 갭 채우기: 소실 → 대기 카운터 → 재등장 시 계속, 초과 시 종료. 갭 3방식(기본=BACKGROUND): 배경 계속/컷/프리즈.
 6. 수동 교정: 미리보기 일시정지 → 교정 모드 → 세그 재오버레이 → 재지정 → 그 프레임부터 부분 재추적, 이전 구간 보존.
 7. 크롭 = centroid 중심 W×H, 떨림완화 N-프레임 이동평균(기본 5, 약3/표준5/강10), 경계 클램프, 짝수 정렬, LANCZOS4, 종횡비 잠금.
 8. 구간 지정 = 타임라인 드래그(시작/끝 핸들), 선택 구간만 스트리밍 디코드.

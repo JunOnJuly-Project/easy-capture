@@ -1,6 +1,6 @@
 # easy-capture — 아키텍처
 
-> 최종 업데이트: 2026-05-27 · 관련: [데이터플로우](data-flow.md) · [리소스](resources.md) · [ADR](adr/)
+> 최종 업데이트: 2026-05-28 · 관련: [데이터플로우](data-flow.md) · [리소스](resources.md) · [ADR](adr/)
 
 ---
 
@@ -14,13 +14,13 @@
                 │ 시그널/슬롯, 진행 콜백
 ┌───────────────┴────────────────────────────────────┐
 │ Application (유스케이스 오케스트레이션)              │
-│  ImageCaptureUseCase · GifCaptureUseCase · Session  │
+│  ImageCaptureUseCase · VideoCaptureUseCase · Session │
 └───────────────▲────────────────────────────────────┘
                 │
 ┌───────────────┴────────────────────────────────────┐
 │ Core (도메인 로직, UI/IO 비의존)                     │
-│  segmentation · tracking · correction · crop ·      │
-│  upscale · export                                   │
+│  segmentation · source · tracking · correction ·    │
+│  crop · upscale · export · timing(예정)              │
 └───────────────▲────────────────────────────────────┘
                 │
 ┌───────────────┴────────────────────────────────────┐
@@ -39,13 +39,19 @@
 |---|---|
 | `ui/` | 스플래시·모드선택·메인윈도·프레임 캔버스(클릭/박스 드래그)·타임라인(시작/끝 핸들)·교정 모드. 워커 진행률·ETA 표시 |
 | `app/usecase` | 모드별 흐름 오케스트레이션, Session 상태 관리 |
-| `core/segmentation` | Grounding DINO 검출 + SAM2 image predictor 마스크 (단일 프레임) |
-| `core/tracking` | SAM2 video predictor 전파 + occlusion 정책 + **샷 경계 재매칭** |
+| `core/segmentation` | **3종 Protocol 추상**: `SegmentationBackend`(이미지 단일 프레임 마스크), `VideoSegmentationBackend`(단일 샷 프레임 전파 추적, ADR 0010), `DetectionBackend`(컷 경계 재검출·무상태, ADR 0012) |
+| `core/source` | `FrameSource`·`FrameSpan`·`FrameMeta` Protocol — 이미지/영상 프레임 공급 추상 |
+| `core/tracking` | 갭 정책(gap_policy, 기본=BACKGROUND)·재매칭 점수(rematch\_score)·샷 분할(split\_into\_shots)·떨림완화(smooth\_boxes). SAM2 video 구현체는 infra에 위치 |
 | `core/correction` | 지정 프레임부터 부분 재추적, 이전 성공 구간 보존·병합 |
 | `core/crop` | centroid 산출, N-프레임 이동평균 떨림완화, 경계 클램프, 짝수 정렬, LANCZOS4 리사이즈, 종횡비 잠금 |
-| `core/upscale` | Real-ESRGAN / SwinIR 공통 인터페이스, 타일링 |
+| `core/upscale` | `UpscaleBackend` Protocol(ADR 0009) + 순수 정규화 함수(`reconstruction_to_rgb_uint8`). SwinIR/Real-ESRGAN 구현체는 infra에 위치 |
 | `core/export` | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(yuv420p·오디오 mux), 갭 채우기 정책 적용 |
-| `infra/video_io` | PyAV 디코드(PTS·VFR 대응), ffprobe 메타, 구간 스트리밍 |
+| `core/timing` | 구간별 가변 재생속도(슬로우/패스트) 순수 로직 — **계획 단계, 미구현** |
+| `infra/sam2_image_backend` | `Sam2ImageBackend` — `SegmentationBackend` 구현 (transformers 5.9.0 `Sam2Model`) |
+| `infra/sam2_video_backend` | `Sam2VideoBackend` — `VideoSegmentationBackend` 구현 (transformers 5.9.0 `Sam2VideoModel`) |
+| `infra/grounding_dino_backend` | `GroundingDinoBackend` — `DetectionBackend` 구현 (transformers 5.9.0) |
+| `infra/swin2sr_upscale_backend` | `Swin2srUpscaleBackend` — `UpscaleBackend` 구현 (transformers 5.9.0) |
+| `infra/video_io` | PyAV 디코드(PTS·VFR 대응), ffprobe 메타, 구간 스트리밍. `FrameSource` Protocol 구현체 포함 |
 | `infra/model_registry` | 모델 다운로드 매니저(진행 콜백·재시도·캐시 검증), 티어 선택 |
 | `infra/device` | CUDA 감지, 모델 티어·해상도 자동 조정, 처리 예상시간 산출 |
 
@@ -53,26 +59,42 @@
 
 ## 3. 핵심 인터페이스 (추상화)
 
-```python
-class Detector(Protocol):              # Grounding DINO 등 교체 가능
-    def detect(self, frame, prompt: str) -> list[Detection]: ...
+ADR 0010·0012에 따라 세그멘테이션 책임은 3종 Protocol로 분리되어 있다. 이미지 전용·비디오 추적·컷 재검출은 각각 독립 인터페이스다.
 
-class SegmentationBackend(Protocol):   # SAM2 / 경량모델(이미지 전용) 교체 (ADR 0007)
+```python
+# core/segmentation/backend.py  — 이미지 단일 프레임 마스크 (ADR 0007·0008)
+class SegmentationBackend(Protocol):
     device: str
     def segment_image(self, frame, points=None, boxes=None) -> Mask: ...
-    def supports_video(self) -> bool: ...          # 경량 백엔드는 False
-    def init_video_session(self, frames): ...      # SAM2 등 비디오 지원 시
-    def propagate(self, session) -> Iterator[FrameMask]: ...
+    def supports_video(self) -> bool: ...   # 이미지 전용 백엔드는 False
 
-class Upscaler(Protocol):              # SwinIR(기본) / Real-ESRGAN(옵션) 공통
-    def upscale(self, image, scale: int) -> Image: ...
+# core/segmentation/video_backend.py  — 단일 샷 프레임 시퀀스 전파 (ADR 0010)
+class VideoSegmentationBackend(Protocol):
+    device: str
+    def init_session(self, frames: list[np.ndarray]) -> object: ...
+    def add_click(self, session: object, point: tuple[int, int]) -> None: ...
+    def propagate(self, session: object) -> list[np.ndarray]: ...
+    # 구현체: infra/sam2_video_backend (transformers 5.9.0 Sam2VideoModel)
 
-class VideoReader(Protocol):           # PyAV / decord 교체 가능
-    def probe(self) -> VideoMeta: ...
-    def read_range(self, start, end) -> Iterator[Frame]: ...
+# core/segmentation/detection_backend.py  — 컷 경계 재검출, 무상태 (ADR 0012)
+class DetectionBackend(Protocol):
+    device: str
+    def detect(self, frame: np.ndarray, prompt: str) -> list[Detection]: ...
+    # 구현체: infra/grounding_dino_backend (transformers 5.9.0)
+
+# core/upscale/backend.py  — 업스케일 공통 인터페이스 (ADR 0009)
+class UpscaleBackend(Protocol):
+    def upscale(self, image: np.ndarray) -> np.ndarray: ...
+    # 구현체: infra/swin2sr_upscale_backend (기본), infra/realesrgan_backend (옵션)
+
+# core/source/frame_source.py  — 이미지/영상 프레임 공급 추상 (ADR 0008)
+class FrameSource(Protocol):
+    def read_frame(self) -> FrameMeta: ...
+    # FrameSpan: 구간 지정. FrameMeta: 프레임+메타.
+    # 구현체: infra/video_io (Pillow·PyAV)
 ```
 
-> 검출기·세그멘테이션 백엔드·업스케일러는 인터페이스로 추상화 → **디바이스(CPU/GPU)·모드(이미지/비디오)** 에 따라 런타임 선택([ADR 0007](adr/0007-cpu-dev-strategy.md)). 이미지 모드는 CPU 백엔드 허용, 비디오 추적은 GPU 백엔드(SAM2). 업스케일 기본 = SwinIR.
+> 세그멘테이션·검출·업스케일·프레임소스는 인터페이스로 추상화 → **디바이스(CPU/GPU)·모드(이미지/비디오)** 에 따라 런타임 선택([ADR 0007](adr/0007-cpu-dev-strategy.md)·[ADR 0010](adr/0010-video-segmentation-backend.md)·[ADR 0012](adr/0012-detection-backend.md)). 이미지 모드는 CPU 백엔드 허용, 비디오 추적은 GPU 백엔드 필요. 업스케일 기본 = SwinIR/Swin2SR([ADR 0009](adr/0009-upscale-export-integration.md)).
 
 ---
 

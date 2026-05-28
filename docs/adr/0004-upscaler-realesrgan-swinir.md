@@ -18,3 +18,4 @@
 - **확정**(공식 repo 확인, [resources.md](../resources.md) §2): SwinIR/Swin2SR·Real-ESRGAN 코드는 상업 가능(Apache/BSD-3), basicsr Apache 2.0. **Real-ESRGAN 가중치는 DIV2K(학술 전용) 학습**이라 상업 배포 리스크 → **기본 = SwinIR**, Real-ESRGAN 은 옵션·경고.
 - 프레임 단독 처리로 인한 플리커는 고지, temporal smoothing 은 v1.1([error-handling.md](../error-handling.md) §4).
 - 두 모델은 `core/upscale` 공통 인터페이스로 추상화([ADR 0007](0007-cpu-dev-strategy.md) 백엔드 추상화와 정합).
+- **업스케일 추상화 구현**: `core/upscale` 공통 인터페이스는 [ADR 0009](0009-upscale-export-integration.md)에서 `UpscaleBackend` Protocol로 명문화·구현되었다. Swin2SR 구현체(`Swin2srUpscaleBackend`)는 `infra/swin2sr_upscale_backend.py`에 위치하며, `ImageCaptureUseCase.export`에 옵션 주입 방식으로 통합된다. 상세는 [ADR 0009](0009-upscale-export-integration.md) 참조.

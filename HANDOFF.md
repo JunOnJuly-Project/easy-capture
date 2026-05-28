@@ -103,7 +103,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 2. **SAM2+업스케일 이미지 모드 CPU 수동 스모크**: `python -m easy_capture` → 이미지 → 클릭 → 종횡비/크기 → (업스케일) 저장. 저장 크기 = 크롭 × 배율 단언.
 3. **🎬 슬로우모션(타임리맵) 구현** (계획·페르소나 3인 컨펌 완료, 착수 예정): ADR 0013 → Story 1(`core/timing` 순수 로직) → GIF(per-frame duration) → MP4(프레임 복제) → export 결합 → UI 순, `/develop --tdd`. 계획서 `docs/plans/video-speed-remap-plan.md`. 잔여 구현 디테일: 미리보기 프레임 스크럽(prev/next), `schedule_to_cfr_indices` 선반영 주석, 저fps GIF 패스트 경고 문구.
 4. **비디오 후속 슬라이스**: 수동 교정 UI(needs_correction → `core/correction`) → 오디오 동기(H4) → 업스케일 결합 → 트림+슬로우+루프 → 타임라인 고도화. (샷경계 재추적·occlusion gap UI 완료)
-5. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux`·`feature/image/upscale`·`feature/video/tracking-slice`·`feature/video/shot-retrack`·`feature/video/gap-policy-ui`·`feature/video/crop-tuning`·`feature/video/speed-remap` → main PR/머지.
+5. (정리) `docs/planning-set`·`feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux`·`feature/image/upscale`·`feature/video/tracking-slice`·`feature/video/shot-retrack`·`feature/video/gap-policy-ui`·`feature/video/crop-tuning`·`feature/video/speed-remap` → main PR/머지. (선형 사슬이라 speed-remap 머지 시 전 브랜치 포함 — fast-forward 가능, 충돌 0)
 
 ### PoC 핵심 결과 (요약)
 - SAM2(이미지+비디오)·Grounding DINO 는 **transformers 5.9.0 만으로** 사용 가능(별도 `sam2` 패키지 불필요).

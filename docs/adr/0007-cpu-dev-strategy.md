@@ -36,3 +36,21 @@ class SegmentationBackend(Protocol):
 - `architecture.md` 의 모델 추상화 IF 를 `SegmentationBackend`(비디오 Optional)로 구체화.
 - 디바이스 자동 감지 결과로 백엔드·모델 티어 선택([infra/device]).
 - EdgeTAM·경량 CPU 비디오 추적은 v1.1 후보로 백로그.
+
+---
+
+## 보완 (2026-05-28, 구현 확정)
+
+본 ADR의 원안(`§결정 3`)에서 단일 `SegmentationBackend`에 비디오 메서드를 Optional로 두는 설계를 제시했다. 구현 단계에서 이 설계의 두 가지 문제점이 드러났다.
+
+- **ISP 위반**: 이미지 전용 백엔드(`Sam2ImageBackend`, 경량 MobileSAM 등)가 사용하지 않는 비디오 메서드를 빈 몸통으로 구현해야 한다.
+- **호출자 분기 복잡도**: `supports_video()` 체크와 `hasattr` 분기가 유스케이스 곳곳에 분산된다.
+
+이에 따라 원안 설계는 두 후속 ADR로 **구체화·대체**되었다.
+
+| 후속 ADR | 내용 |
+|---|---|
+| [ADR 0010](0010-video-segmentation-backend.md) | `VideoSegmentationBackend`를 독립 Protocol로 분리 (ISP 준수, opaque session) |
+| [ADR 0012](0012-detection-backend.md) | `DetectionBackend`를 독립 Protocol로 분리 (컷 재검출, 무상태) |
+
+`SegmentationBackend`는 이미지 단일 프레임 마스크 전용으로 유지되며, `supports_video()` 플래그는 "이미지 백엔드의 비디오 미지원 표식"으로만 보존된다. 비디오 유스케이스(`VideoCaptureUseCase`)는 `VideoSegmentationBackend`만 주입받는다.

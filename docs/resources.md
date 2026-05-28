@@ -1,6 +1,6 @@
 # easy-capture — 리소스 / 기술스택 명세
 
-> 최종 업데이트: 2026-05-27 · 관련: [아키텍처](architecture.md) · [ADR](adr/) · [RFP](RFP.md)
+> 최종 업데이트: 2026-05-28 · 관련: [아키텍처](architecture.md) · [ADR](adr/) · [RFP](RFP.md)
 > ⚠ 모든 repo id·크기·라이선스는 **구현 착수 전 공식 페이지(HF/GitHub)로 1회 대조**한다.
 
 ---
@@ -54,13 +54,13 @@
 ```
 # AI / 추적
 torch, torchvision
-transformers
-sam2                 # 공식 video predictor
+transformers>=5.9.0  # SAM2 이미지(Sam2Model)·비디오(Sam2VideoModel)·Grounding DINO·Swin2SR 모두 포함
+# sam2               # 불필요 — transformers 5.9.0 단독으로 대체됨 (ADR 0001 보완 참조)
 scenedetect          # PySceneDetect
 
 # 업스케일
 realesrgan, basicsr  # 옵션 (라이선스 확정 후)
-# SwinIR 은 transformers 로 사용
+# SwinIR/Swin2SR 은 transformers 로 사용 (별도 패키지 불필요)
 
 # 비디오 / 이미지 IO
 av                   # PyAV

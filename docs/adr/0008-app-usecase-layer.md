@@ -74,3 +74,14 @@ class ImageCaptureUseCase:
 
 - **파일 수 증가**: `app/__init__.py`, `router.py`, `image_capture.py` 3개 파일이 추가된다. 작은 프로젝트 초기에는 over-engineering으로 보일 수 있다.
 - **팩토리 부담**: 조립 루트(`router.py`)가 구체 타입을 알아야 하므로, 새 infra 구현체 추가 시 라우터도 수정해야 한다. 의존성 주입 컨테이너 없이 수동 조립이므로 규모 확장 시 관리 비용이 생긴다(현재 규모에서는 허용 가능).
+
+---
+
+## 보완 (2026-05-28, 구현 확정)
+
+본 ADR에서 `FrameSource` Protocol을 core 추상으로 두어 UI와 infra가 직접 의존하지 않게 한다는 원칙을 명시했다. 초기 구현에서 `FrameSource`·`FrameSpan`·`FrameMeta`가 `infra/video_io.py`에 임시 위치했으나, **이후 `core/source/frame_source.py`로 이동**되어 본 ADR의 원안(core 추상)과 정합이 확보되었다.
+
+- `core/source/frame_source.py`: `FrameSource`·`FrameSpan`·`FrameMeta` Protocol/데이터클래스 (torch·PyAV·PySide6 비의존)
+- `infra/video_io.py`: `FrameSource` Protocol 구현체(Pillow 이미지·PyAV 영상) — core를 역방향으로 참조하지 않는 의존 방향 유지
+
+이로써 "app → core(Protocol/추상)만 의존, infra → core(Protocol 구현)" 불변식이 `FrameSource` 계층에서도 성립한다.
