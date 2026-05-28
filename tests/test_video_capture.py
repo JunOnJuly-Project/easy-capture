@@ -85,6 +85,18 @@ except ImportError:
     Detection = None  # type: ignore[assignment]
     _HAS_DETECTION = False
 
+# --- Story 4: VideoExportConfig·GapPolicy — Story 2/3에서 이미 구현됨 ---
+# WHY try/except: export/video_export.py가 없으면 Story 4 테스트만 FAIL하고
+#   기존 테스트가 차단되지 않도록 한다.
+try:
+    from easy_capture.core.export.video_export import VideoExportConfig
+    from easy_capture.core.tracking.gap_policy import GapPolicy
+    _HAS_VIDEO_EXPORT_CONFIG = True
+except ImportError:
+    VideoExportConfig = None  # type: ignore[assignment,misc]
+    GapPolicy = None  # type: ignore[assignment,misc]
+    _HAS_VIDEO_EXPORT_CONFIG = False
+
 # 미구현 시 전 테스트 skip 이유 메시지
 _MSG_NOT_IMPL = (
     "easy_capture.app.video_capture 또는 "
@@ -2216,4 +2228,772 @@ class TestComputeBoxesNewBehavior:
             f"큰 마스크 compute_boxes 반복 중 propagate 재호출 감지: "
             f"{backend.propagate_call_count} vs 기준 {propagate_base}. "
             "compute_boxes는 순수 함수여야 한다."
+        )
+
+
+# ===========================================================================
+# Story 4 — export 결합 (app) [브랜치 feature/app/export-timeremap]
+#
+# TDD RED 단계:
+#   Task 4-1~4-2: usecase.export()에 타임리맵 단계 미삽입 → 슬로우/패스트 테스트 FAIL
+#   Task 4-3: estimate_output_frame_count 미구현 → ImportError 또는 AttributeError FAIL
+#
+# 설계 가정(모호한 시그니처):
+#   - estimate_output_frame_count(n_selected, segments, fps) → int
+#     위치: easy_capture.core.timing.timeremap (순수 헬퍼, timeremap 계획서 §6-1)
+#     WHY timeremap 위치: schedule_to_cfr_indices 길이 기반 순수 계산이므로
+#       core/export 경계 밖 순수 도메인 로직으로 분리하는 것이 자연스럽다.
+#   - usecase.export()는 segments 있을 때 selected_frames 기준으로
+#     build_playback_schedule → schedule_to_cfr_indices(MP4) /
+#     clamp_durations_for_gif(GIF) 경유 encode_frames에 전달한다.
+#     (encode_frames의 config.segments를 이미 이용하거나,
+#      usecase.export가 직접 config를 수정 없이 그대로 넘기는 두 방식 모두 허용)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Story 4 테스트 상수 — 매직넘버 금지
+# ---------------------------------------------------------------------------
+# 합성 프레임 크기 (FakeFrameSource 고정 크기와 동일)
+_S4_FRAME_W: int = FAKE_FRAME_W   # 640
+_S4_FRAME_H: int = FAKE_FRAME_H   # 360
+
+# Story 4 기본 프레임 수·크롭 설정
+_S4_N_FRAMES: int = 10             # 총 프레임 수
+_S4_CROP_BOX_W: int = 64           # 크롭 박스 너비 (작게 — 빠른 인코딩)
+_S4_CROP_BOX_H: int = 48           # 크롭 박스 높이
+
+# 슬로우 구간 상수
+_S4_SLOW_START: int = 2            # 슬로우 구간 시작 (포함)
+_S4_SLOW_END: int = 5              # 슬로우 구간 끝 (미포함) → 프레임 2,3,4 (3개)
+_S4_SLOW_FACTOR: float = 0.5       # 슬로우 배속 → duration ×2, MP4 프레임 ×2
+
+# occlusion 구간 상수 (CUT + segments 2단계 인덱싱 테스트용)
+_S4_OCCLUSION_AFTER: int = 7       # 이 인덱스(포함)부터 centroid=None
+
+# MP4 기준 fps
+_S4_FPS: float = 12.0
+
+# 프레임 수 허용 오차 (Bresenham ±1)
+_S4_FRAME_COUNT_TOLERANCE: int = 1
+
+# GIF duration 허용 오차 (centisecond ±10ms)
+_S4_GIF_DURATION_TOL_MS: float = 10.0
+
+# imageio 조건부 skip — 미설치 시 GIF/MP4 라운드트립 건너뜀
+# (파일 레벨 importorskip과 달리 Story 4는 클래스별 개별 skip으로 처리)
+_S4_IMAGEIO_AVAILABLE: bool = True
+try:
+    import imageio as _imageio_check  # noqa: F401
+except ImportError:
+    _S4_IMAGEIO_AVAILABLE = False
+
+_MSG_S4_NO_IMAGEIO: str = "imageio 미설치 — Story 4 GIF/MP4 라운드트립 건너뜀"
+
+# ffmpeg 조건부 skip
+_S4_FFMPEG_AVAILABLE: bool = False
+try:
+    import imageio_ffmpeg  # noqa: F401
+    _S4_FFMPEG_AVAILABLE = True
+except ImportError:
+    pass
+
+_MSG_S4_NO_FFMPEG: str = "imageio-ffmpeg 미설치 — Story 4 MP4 라운드트립 건너뜀"
+
+# timeremap — SpeedSegment 가용 여부 (Story 1에서 이미 구현됨)
+try:
+    from easy_capture.core.timing.timeremap import SpeedSegment as _SpeedSegment
+    _S4_HAS_TIMEREMAP: bool = True
+except ImportError:
+    _SpeedSegment = None  # type: ignore[assignment,misc]
+    _S4_HAS_TIMEREMAP: bool = False
+
+_MSG_S4_NO_TIMEREMAP: str = "easy_capture.core.timing.timeremap 미설치"
+
+# Task 4-3: estimate_output_frame_count — 미구현이므로 RED 예상
+# WHY try/except: 미구현 시 ImportError를 조용히 잡아 기존 테스트를 차단하지 않는다.
+#   이 심볼이 없으면 해당 클래스(TestEstimateOutputFrameCount)만 FAIL이 된다.
+try:
+    from easy_capture.core.timing.timeremap import (  # type: ignore[attr-defined]
+        estimate_output_frame_count,
+    )
+    _S4_HAS_ESTIMATE: bool = True
+except ImportError:
+    estimate_output_frame_count = None  # type: ignore[assignment,misc]
+    _S4_HAS_ESTIMATE: bool = False
+
+_MSG_S4_ESTIMATE_NOT_IMPL: str = (
+    "estimate_output_frame_count 미구현 — Task 4-3 RED 예상. "
+    "easy_capture.core.timing.timeremap에 추가 필요."
+)
+
+# WHY xfail: skip이 아닌 RED(FAIL) 상태를 명시한다.
+# estimate_output_frame_count가 미구현이면 테스트가 xfail(예상된 실패)로 기록된다.
+# 구현 후 PASS로 전환되면 xpass(예상 외 통과)가 되어 GREEN 전환을 알 수 있다.
+_ESTIMATE_XFAIL_REASON: str = (
+    "Task 4-3 미구현: estimate_output_frame_count가 "
+    "easy_capture.core.timing.timeremap에 없음 — RED 상태 정상"
+)
+
+# Story 4 전체 skip 조건 (usecase + timeremap + VideoExportConfig 모두 필요)
+_S4_SKIP: bool = not (_HAS_VIDEO_USECASE and _S4_HAS_TIMEREMAP and _HAS_VIDEO_EXPORT_CONFIG)
+_MSG_S4_NOT_IMPL: str = (
+    "VideoCaptureUseCase 또는 timeremap 또는 VideoExportConfig 미구현 — Story 4 건너뜀"
+)
+
+
+# ---------------------------------------------------------------------------
+# Story 4 픽스처 헬퍼
+# ---------------------------------------------------------------------------
+def _make_s4_frames(n: int = _S4_N_FRAMES) -> list[np.ndarray]:
+    """Story 4용 합성 프레임 리스트 (프레임별 R채널 구분).
+
+    WHY 프레임별 다른 색: GIF 최적화(동일 프레임 병합)로 프레임 수가 왜곡되는
+    것을 방지한다. R채널 = i*25 로 각 프레임을 구분한다.
+    """
+    frames = []
+    for i in range(n):
+        frame = np.zeros((_S4_FRAME_H, _S4_FRAME_W, 3), dtype=np.uint8)
+        frame[:, :, 0] = (i * 25) % 256
+        frame[:, :, 1] = 100
+        frame[:, :, 2] = 128
+        frames.append(frame)
+    return frames
+
+
+def _make_s4_track_result(
+    n: int = _S4_N_FRAMES,
+    occlusion_after: int | None = None,
+) -> "TrackResult":
+    """Story 4용 TrackResult 직접 구성.
+
+    WHY 직접 구성: backend(SAM2) 없이 export 단위 테스트를 가능하게 한다.
+    모든 centroid는 프레임 중앙 (valid). occlusion_after 지정 시 이후 None.
+    masks는 bool 배열로 채운다 (크롭 박스 계산 가드용).
+
+    Args:
+        n: 총 프레임 수.
+        occlusion_after: 이 인덱스(포함)부터 centroid=None. None이면 전부 valid.
+    """
+    cx, cy = float(_S4_FRAME_W // 2), float(_S4_FRAME_H // 2)
+    HALF = 20  # 마스크 사각형 반폭
+    centroids = []
+    masks = []
+    for i in range(n):
+        if occlusion_after is not None and i >= occlusion_after:
+            centroids.append(None)
+            masks.append(np.zeros((_S4_FRAME_H, _S4_FRAME_W), dtype=bool))
+        else:
+            centroids.append((cx, cy))
+            mask = _make_rect_mask(_S4_FRAME_H, _S4_FRAME_W, int(cx), int(cy), half=HALF)
+            masks.append(mask)
+    return TrackResult(
+        masks=masks,
+        centroids=centroids,
+        needs_correction=[False] * n,
+        cut_frames=[],
+    )
+
+
+def _make_s4_fixed_boxes(
+    n: int = _S4_N_FRAMES,
+    w: int = _S4_CROP_BOX_W,
+    h: int = _S4_CROP_BOX_H,
+) -> list[tuple[int, int, int, int]]:
+    """Story 4용 고정 크롭 박스 리스트 (동일 크기 보장).
+
+    프레임 왼쪽 상단 기준으로 w×h 박스를 배치한다.
+    """
+    return [(0, 0, w, h)] * n
+
+
+def _read_gif_frame_durations_s4(gif_path: str) -> list[int]:
+    """PIL로 GIF 프레임별 duration(ms) 리스트를 반환한다.
+
+    WHY PIL: imageio.get_reader()는 단일 duration만 반환하므로
+    per-frame duration 검증에는 PIL seek(i) + info['duration']를 사용한다.
+    """
+    from PIL import Image
+
+    durations: list[int] = []
+    with Image.open(gif_path) as img:
+        for i in range(img.n_frames):
+            img.seek(i)
+            durations.append(img.info.get("duration", 0))
+    return durations
+
+
+def _count_mp4_frames_s4(mp4_path: str) -> int:
+    """imageio(ffmpeg)로 MP4 총 프레임 수를 반환한다.
+
+    WHY 전체 순회: meta_data.nframes는 추정치일 수 있어 직접 순회로 정확히 센다.
+    """
+    import imageio
+
+    count = 0
+    with imageio.get_reader(mp4_path, format="ffmpeg") as reader:
+        for _ in reader:
+            count += 1
+    return count
+
+
+# ===========================================================================
+# Task 4-4 (a) — 무회귀: segments=() export 결과가 기존과 동일
+# ===========================================================================
+class TestStory4NoRegressionSegmentsEmpty:
+    """Story 4 무회귀: segments=() export 결과가 기존 경로와 동일.
+
+    WHY: Story 4 구현 후에도 segments 미지정 export가 기존 동작을 유지해야 한다.
+         이 클래스가 깨지면 Story 4 구현이 기존 export 경로에 영향을 준 것이다.
+    """
+
+    @pytest.mark.skipif(_S4_SKIP, reason=_MSG_S4_NOT_IMPL)
+    @pytest.mark.skipif(not _S4_IMAGEIO_AVAILABLE, reason=_MSG_S4_NO_IMAGEIO)
+    def test_segments_빈_튜플_GIF_프레임_수가_선택된_프레임_수와_동일하다(
+        self, tmp_path
+    ):
+        """Given: 10개 고유 프레임, segments=(), CUT 정책(모든 centroid valid)
+        When:  usecase.export → GIF 생성
+        Then:  GIF 프레임 수 == 10 (segments 없음 → 복제/드롭 없음)
+
+        WHY: segments=() 경로는 기존 encode_frames 동작과 동일해야 한다(무회귀).
+        """
+        import imageio
+
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(_S4_N_FRAMES)  # 전 프레임 valid
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        out_path = str(tmp_path / "s4_no_segments.gif")
+        config = VideoExportConfig(
+            fmt="gif",
+            fps=_S4_FPS,
+            gap_policy=GapPolicy.BACKGROUND,
+            segments=(),
+        )
+        usecase, _ = _make_usecase()
+
+        # when
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        # then
+        reloaded = imageio.mimread(out_path)
+        assert len(reloaded) == _S4_N_FRAMES, (
+            f"segments=() GIF 프레임 수 불일치: {len(reloaded)} vs {_S4_N_FRAMES}. "
+            "무회귀 실패 — segments=() 경로가 변경됐을 수 있음."
+        )
+
+    @pytest.mark.skipif(_S4_SKIP, reason=_MSG_S4_NOT_IMPL)
+    @pytest.mark.skipif(not _S4_IMAGEIO_AVAILABLE, reason=_MSG_S4_NO_IMAGEIO)
+    def test_segments_빈_튜플_GIF_duration이_균일하다(self, tmp_path):
+        """Given: segments=(), fps=12, 10개 프레임
+        When:  usecase.export → GIF
+        Then:  모든 프레임 duration ≈ 1000/12 ≈ 83ms (±10ms)
+
+        WHY: segments=() 균일 duration 경로가 Story 4 삽입 후에도 동일해야 한다.
+        """
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(_S4_N_FRAMES)
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        out_path = str(tmp_path / "s4_uniform_dur.gif")
+        config = VideoExportConfig(fmt="gif", fps=_S4_FPS, segments=())
+        usecase, _ = _make_usecase()
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        frame_durations = _read_gif_frame_durations_s4(out_path)
+        expected_ms = 1000.0 / _S4_FPS  # ≈ 83.3ms
+
+        assert len(frame_durations) == _S4_N_FRAMES, (
+            f"GIF 프레임 수 불일치: {len(frame_durations)} vs {_S4_N_FRAMES}"
+        )
+        for i, dur in enumerate(frame_durations):
+            assert abs(dur - expected_ms) <= _S4_GIF_DURATION_TOL_MS, (
+                f"segments=() 균일 duration 불일치: 프레임 {i} → {dur}ms "
+                f"vs 기대 {expected_ms:.1f}ms (±{_S4_GIF_DURATION_TOL_MS}ms). "
+                "무회귀 실패."
+            )
+
+
+# ===========================================================================
+# Task 4-4 (b) — 슬로우 end-to-end: segments 지정 GIF duration·MP4 프레임 수 변화
+# ===========================================================================
+class TestStory4SlowMotionEndToEnd:
+    """Story 4 슬로우 end-to-end: usecase.export + segments → GIF duration 2배·MP4 증가.
+
+    RED 상태 예상: usecase.export()가 config.segments를 encode_frames에
+    그대로 위임하거나(이미 S2/S3에서 구현), usecase.export 내부에서
+    selected 기준 schedule을 재계산하는 경우 중 아직 미구현이면 FAIL.
+
+    WHY end-to-end: encode_frames 단위 테스트(test_video_export.py)는
+    crops를 직접 받지만, usecase.export는 frames→selected→crops 파이프라인
+    전체를 검증해야 한다. selected 기준 segments 적용이 올바른지 확인한다.
+    """
+
+    @pytest.mark.skipif(_S4_SKIP, reason=_MSG_S4_NOT_IMPL)
+    @pytest.mark.skipif(not _S4_IMAGEIO_AVAILABLE, reason=_MSG_S4_NO_IMAGEIO)
+    def test_슬로우_segments_GIF_슬로우_구간_duration이_2배다(self, tmp_path):
+        """Given: 10개 고유 프레임, segments=(SpeedSegment(2,5,0.5),), fps=12, GIF
+        When:  usecase.export → GIF 생성 → PIL로 per-frame duration 읽기
+        Then:  프레임 2,3,4 duration ≈ (1000/12)/0.5 ≈ 166ms (±10ms)
+               프레임 0,1,5~9 duration ≈ 1000/12 ≈ 83ms (±10ms)
+
+        WHY: usecase.export가 selected_frames(gap_policy 적용 후) 기준으로
+             build_playback_schedule을 호출하거나 encode_frames에 config.segments를
+             그대로 넘겨 슬로우 duration이 실제 출력에 반영되는지 검증한다.
+             selected = 전 10개 프레임(centroid 전부 valid + BACKGROUND 정책).
+        """
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(_S4_N_FRAMES)  # 전 프레임 valid
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        seg = _SpeedSegment(_S4_SLOW_START, _S4_SLOW_END, _S4_SLOW_FACTOR)
+        config = VideoExportConfig(
+            fmt="gif",
+            fps=_S4_FPS,
+            gap_policy=GapPolicy.BACKGROUND,
+            segments=(seg,),
+        )
+        out_path = str(tmp_path / "s4_slow_gif.gif")
+        usecase, _ = _make_usecase()
+
+        # when
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        # then
+        frame_durations = _read_gif_frame_durations_s4(out_path)
+        base_ms = 1000.0 / _S4_FPS                   # ≈ 83.3ms
+        slow_ms = base_ms / _S4_SLOW_FACTOR           # ≈ 166.6ms
+        slow_frame_indices = set(range(_S4_SLOW_START, _S4_SLOW_END))  # {2,3,4}
+
+        assert len(frame_durations) == _S4_N_FRAMES, (
+            f"슬로우 GIF 프레임 수 불일치: {len(frame_durations)} vs {_S4_N_FRAMES}"
+        )
+        for i, dur in enumerate(frame_durations):
+            if i in slow_frame_indices:
+                assert abs(dur - slow_ms) <= _S4_GIF_DURATION_TOL_MS, (
+                    f"슬로우 구간 프레임 {i} duration 불일치: {dur}ms "
+                    f"vs 기대 {slow_ms:.1f}ms (±{_S4_GIF_DURATION_TOL_MS}ms). "
+                    f"factor={_S4_SLOW_FACTOR} → 2배 느린 duration 기대. "
+                    "usecase.export가 segments를 encode_frames에 전달하지 않거나 "
+                    "selected 기준 재계산이 미구현일 수 있음."
+                )
+            else:
+                assert abs(dur - base_ms) <= _S4_GIF_DURATION_TOL_MS, (
+                    f"균일 구간 프레임 {i} duration 불일치: {dur}ms "
+                    f"vs 기대 {base_ms:.1f}ms (±{_S4_GIF_DURATION_TOL_MS}ms). "
+                    "구간 밖은 균일 속도여야 함."
+                )
+
+    @pytest.mark.skipif(_S4_SKIP, reason=_MSG_S4_NOT_IMPL)
+    @pytest.mark.skipif(not _S4_IMAGEIO_AVAILABLE, reason=_MSG_S4_NO_IMAGEIO)
+    @pytest.mark.skipif(not _S4_FFMPEG_AVAILABLE, reason=_MSG_S4_NO_FFMPEG)
+    def test_슬로우_segments_MP4_프레임_수가_증가한다(self, tmp_path):
+        """Given: 10개 고유 프레임, segments=(SpeedSegment(2,5,0.5),), fps=12, MP4
+        When:  usecase.export → MP4 생성 → imageio로 총 프레임 수 확인
+        Then:  총 프레임 수 ≈ 13 (±1)
+               구간 밖 7프레임 + 슬로우 구간 3프레임 × 2배 ≈ 6 = 13
+
+        WHY (MP4 CFR 방식): MP4는 GIF와 달리 프레임별 delay 지정 불가.
+             슬로우는 프레임 복제로 표현한다. usecase.export end-to-end 검증.
+        """
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(_S4_N_FRAMES)
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        seg = _SpeedSegment(_S4_SLOW_START, _S4_SLOW_END, _S4_SLOW_FACTOR)
+        config = VideoExportConfig(
+            fmt="mp4",
+            fps=_S4_FPS,
+            gap_policy=GapPolicy.BACKGROUND,
+            segments=(seg,),
+        )
+        out_path = str(tmp_path / "s4_slow_mp4.mp4")
+        usecase, _ = _make_usecase()
+
+        # 기대 프레임 수 계산 (매직넘버 금지)
+        # 구간 밖: _S4_N_FRAMES - (_S4_SLOW_END - _S4_SLOW_START) = 10 - 3 = 7
+        # 슬로우 구간: 3 / 0.5 = 6
+        _N_OUTSIDE = _S4_N_FRAMES - (_S4_SLOW_END - _S4_SLOW_START)
+        _N_SLOW = round((_S4_SLOW_END - _S4_SLOW_START) / _S4_SLOW_FACTOR)
+        _EXPECTED_TOTAL = _N_OUTSIDE + _N_SLOW  # 7 + 6 = 13
+
+        # when
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        # then
+        actual_count = _count_mp4_frames_s4(out_path)
+        assert abs(actual_count - _EXPECTED_TOTAL) <= _S4_FRAME_COUNT_TOLERANCE, (
+            f"슬로우 MP4 프레임 수 불일치: {actual_count} vs 기대 {_EXPECTED_TOTAL} "
+            f"(±{_S4_FRAME_COUNT_TOLERANCE}). "
+            "usecase.export가 MP4 경로에서 segments 복제를 반영하지 않음."
+        )
+
+
+# ===========================================================================
+# Task 4-4 (c) — 2단계 인덱싱: CUT + segments + occlusion 동시 적용
+# ===========================================================================
+class TestStory4TwoStageIndexing:
+    """Story 4 2단계 인덱싱: gap_policy=CUT + occlusion + segments 조합 검증.
+
+    계획서 수용 기준: selected(occlusion 제외) 기준으로 segments 적용,
+    에러 없이 동작하며 결과 프레임 수가 합리적이어야 한다.
+
+    WHY 2단계:
+      1단계: gap_policy=CUT → centroids에서 None 프레임 제거 → selected_frames/boxes
+      2단계: selected_frames 기준으로 segments(SpeedSegment) 적용
+      이 순서가 역전되거나 한 단계가 누락되면 인덱스 불일치로 크롭/export가 깨진다.
+    """
+
+    @pytest.mark.skipif(_S4_SKIP, reason=_MSG_S4_NOT_IMPL)
+    @pytest.mark.skipif(not _S4_IMAGEIO_AVAILABLE, reason=_MSG_S4_NO_IMAGEIO)
+    def test_CUT_정책_occlusion_있을_때_segments_GIF_에러_없이_동작한다(
+        self, tmp_path
+    ):
+        """Given: 10개 프레임 중 7~9 occlusion(centroid=None), CUT 정책,
+                  segments=(SpeedSegment(2, 5, 0.5),)
+        When:  usecase.export 호출
+        Then:  에러 없이 GIF 파일 생성됨 (RuntimeError·ValueError·IndexError 없음)
+
+        WHY: CUT으로 occlusion 제거 → selected는 0~6 (7개 프레임).
+             segments의 [2,5) 구간은 selected 기준 인덱스.
+             인덱스 범위가 selected 내에 있으므로 정상 동작해야 한다.
+             에러가 발생하면 2단계 인덱싱 구현 문제다.
+        """
+        import imageio
+
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(
+            _S4_N_FRAMES, occlusion_after=_S4_OCCLUSION_AFTER
+        )  # 7,8,9 = occlusion
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        seg = _SpeedSegment(_S4_SLOW_START, _S4_SLOW_END, _S4_SLOW_FACTOR)
+        config = VideoExportConfig(
+            fmt="gif",
+            fps=_S4_FPS,
+            gap_policy=GapPolicy.CUT,
+            segments=(seg,),
+        )
+        out_path = str(tmp_path / "s4_cut_segments.gif")
+        usecase, _ = _make_usecase()
+
+        # when — 에러 없이 완료되어야 한다
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        # then — 파일 존재 + 프레임 수 > 0
+        assert (tmp_path / "s4_cut_segments.gif").exists(), (
+            "CUT + segments GIF 파일이 생성되지 않음"
+        )
+        reloaded = imageio.mimread(out_path)
+        assert len(reloaded) > 0, "CUT + segments GIF 프레임 수가 0 — 빈 파일 생성됨"
+
+    @pytest.mark.skipif(_S4_SKIP, reason=_MSG_S4_NOT_IMPL)
+    @pytest.mark.skipif(not _S4_IMAGEIO_AVAILABLE, reason=_MSG_S4_NO_IMAGEIO)
+    def test_CUT_정책_occlusion_있을_때_segments_GIF_프레임_수가_합리적이다(
+        self, tmp_path
+    ):
+        """Given: 10개 프레임 중 7~9 occlusion, CUT 정책,
+                  segments=(SpeedSegment(2,5,0.5),) — selected(7개) 기준 슬로우
+        When:  usecase.export → GIF
+        Then:  GIF 프레임 수 >= _S4_OCCLUSION_AFTER (7 이상)
+               슬로우 구간 복제로 7보다 클 수 있음. 최소한 selected 수 이상이어야 정상.
+
+        WHY: selected 7개에 슬로우 factor=0.5 구간(3개→6개 복제) 적용 시
+             최소 7개(segments 없는 기존 경로)부터 10개(7-3+6=10) 범위가 합리적.
+             0이나 1이 나오면 2단계 인덱싱이 깨진 것이다.
+        """
+        import imageio
+
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(
+            _S4_N_FRAMES, occlusion_after=_S4_OCCLUSION_AFTER
+        )
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        seg = _SpeedSegment(_S4_SLOW_START, _S4_SLOW_END, _S4_SLOW_FACTOR)
+        config = VideoExportConfig(
+            fmt="gif",
+            fps=_S4_FPS,
+            gap_policy=GapPolicy.CUT,
+            segments=(seg,),
+        )
+        out_path = str(tmp_path / "s4_cut_segments_count.gif")
+        usecase, _ = _make_usecase()
+
+        # 기대 최소값: CUT 후 selected = 7프레임, 슬로우 없이도 7프레임 이상
+        _MIN_EXPECTED = _S4_OCCLUSION_AFTER  # 7
+
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        reloaded = imageio.mimread(out_path)
+        assert len(reloaded) >= _MIN_EXPECTED, (
+            f"CUT + segments GIF 프레임 수({len(reloaded)}) < 최소 기대({_MIN_EXPECTED}). "
+            "2단계 인덱싱 오류: selected 기준 segments 적용이 프레임을 잃음."
+        )
+
+
+# ===========================================================================
+# Task 4-3 — 사전계산 헬퍼: estimate_output_frame_count (순수 함수, RED 예상)
+# ===========================================================================
+class TestEstimateOutputFrameCount:
+    """Task 4-3: estimate_output_frame_count 순수 헬퍼 테스트.
+
+    RED 상태 예상: easy_capture.core.timing.timeremap에 아직 미구현.
+    이 클래스의 모든 테스트는 xfail(예상된 실패)로 기록된다.
+    구현 후 xpass(예상 외 통과) → GREEN 전환 신호.
+
+    설계 계약:
+      estimate_output_frame_count(n_selected, segments, fps) → int
+        - n_selected: selected 프레임 수 (gap_policy 적용 후)
+        - segments: tuple[SpeedSegment, ...] — 배속 구간
+        - fps: 기준 fps (float)
+        반환: 실제 schedule_to_cfr_indices(build_playback_schedule(...)) 길이와 일치(±1).
+        순수 함수: imageio·torch·PySide6 미의존.
+
+    WHY 별도 헬퍼: 폭증 경고(UI·노트북)를 위해 encode_frames 없이도
+      "출력 프레임 수가 몇 개가 될까"를 미리 계산할 수 있어야 한다.
+      encode_frames를 호출하지 않고도 예측 가능한 순수 함수여야 한다.
+    """
+
+    @pytest.mark.xfail(
+        not _S4_HAS_ESTIMATE,
+        reason=_ESTIMATE_XFAIL_REASON,
+        strict=True,
+    )
+    @pytest.mark.skipif(not _S4_HAS_TIMEREMAP, reason=_MSG_S4_NO_TIMEREMAP)
+    def test_segments_빈_튜플이면_n_selected를_그대로_반환한다(self):
+        """Given: n_selected=10, segments=(), fps=12
+        When:  estimate_output_frame_count(10, (), 12.0)
+        Then:  반환값 == 10 (복제/드롭 없음)
+
+        WHY: segments=() → 항등. 사전계산 함수가 기존 경로와 동일해야 한다.
+        """
+        # given
+        n_selected = _S4_N_FRAMES
+        segments: tuple = ()
+        fps = _S4_FPS
+
+        # when
+        result_count = estimate_output_frame_count(n_selected, segments, fps)
+
+        # then
+        assert result_count == n_selected, (
+            f"segments=() 항등 실패: {result_count} vs {n_selected}. "
+            "segments=() 이면 출력 프레임 수 == 입력 프레임 수여야 함."
+        )
+
+    @pytest.mark.xfail(
+        not _S4_HAS_ESTIMATE,
+        reason=_ESTIMATE_XFAIL_REASON,
+        strict=True,
+    )
+    @pytest.mark.skipif(not _S4_HAS_TIMEREMAP, reason=_MSG_S4_NO_TIMEREMAP)
+    def test_슬로우_구간_estimate가_schedule_to_cfr_indices_길이와_일치한다(self):
+        """Given: n_selected=10, segments=(SpeedSegment(2,5,0.5),), fps=12
+        When:  estimate_output_frame_count 호출
+               build_playback_schedule + schedule_to_cfr_indices 직접 계산
+        Then:  estimate 결과 == schedule_to_cfr_indices 길이 (±1)
+
+        WHY: estimate_output_frame_count는 정확히 cfr 길이와 일치해야 한다.
+             이것이 계획서 §6-1 "출력 프레임 수 예측: schedule_to_cfr_indices 길이 기반"
+             수용 기준이다.
+        """
+        from easy_capture.core.timing.timeremap import (
+            build_playback_schedule,
+            schedule_to_cfr_indices,
+        )
+
+        # given
+        n_selected = _S4_N_FRAMES
+        seg = _SpeedSegment(_S4_SLOW_START, _S4_SLOW_END, _S4_SLOW_FACTOR)
+        segments = (seg,)
+        fps = _S4_FPS
+
+        # 실제 cfr 길이 계산 (정답)
+        schedule = build_playback_schedule(n_selected, list(segments), fps)
+        cfr_indices = schedule_to_cfr_indices(schedule)
+        expected_count = len(cfr_indices)
+
+        # when
+        estimated_count = estimate_output_frame_count(n_selected, segments, fps)
+
+        # then
+        assert abs(estimated_count - expected_count) <= _S4_FRAME_COUNT_TOLERANCE, (
+            f"estimate_output_frame_count 불일치: {estimated_count} vs cfr 길이 {expected_count} "
+            f"(±{_S4_FRAME_COUNT_TOLERANCE}). "
+            "estimate 결과가 실제 schedule_to_cfr_indices 길이와 달라짐. "
+            "Task 4-3 미구현 RED 예상."
+        )
+
+    @pytest.mark.xfail(
+        not _S4_HAS_ESTIMATE,
+        reason=_ESTIMATE_XFAIL_REASON,
+        strict=True,
+    )
+    @pytest.mark.skipif(not _S4_HAS_TIMEREMAP, reason=_MSG_S4_NO_TIMEREMAP)
+    def test_estimate_결과가_실제_MP4_출력_프레임_수와_일치한다(self, tmp_path):
+        """Given: n_selected=10, segments=(SpeedSegment(2,5,0.5),), fps=12, fmt='mp4'
+        When:  estimate_output_frame_count 호출
+               usecase.export → MP4 생성 → imageio로 실제 프레임 수 확인
+        Then:  estimate 결과 ≈ 실제 MP4 프레임 수 (±1)
+
+        WHY: 이것이 Task 4-3 "사전계산 헬퍼 결과가 실제 출력 프레임 수와 일치"
+             수용 기준의 핵심 검증이다. 폭증 경고가 실제와 다르면 사용자를 오도한다.
+        """
+        pytest.importorskip("imageio", reason=_MSG_S4_NO_IMAGEIO)
+        pytest.importorskip("imageio_ffmpeg", reason=_MSG_S4_NO_FFMPEG)
+
+        frames = _make_s4_frames(_S4_N_FRAMES)
+        result = _make_s4_track_result(_S4_N_FRAMES)
+        boxes = _make_s4_fixed_boxes(_S4_N_FRAMES)
+
+        seg = _SpeedSegment(_S4_SLOW_START, _S4_SLOW_END, _S4_SLOW_FACTOR)
+        segments = (seg,)
+        config = VideoExportConfig(
+            fmt="mp4",
+            fps=_S4_FPS,
+            gap_policy=GapPolicy.BACKGROUND,
+            segments=segments,
+        )
+        out_path = str(tmp_path / "s4_estimate_match.mp4")
+        usecase, _ = _make_usecase()
+
+        # when
+        estimated_count = estimate_output_frame_count(_S4_N_FRAMES, segments, _S4_FPS)
+        usecase.export(frames, boxes, (out_path, config), result=result)
+        actual_count = _count_mp4_frames_s4(out_path)
+
+        # then
+        assert abs(estimated_count - actual_count) <= _S4_FRAME_COUNT_TOLERANCE, (
+            f"estimate({estimated_count}) vs 실제 MP4 프레임 수({actual_count}) "
+            f"불일치 (±{_S4_FRAME_COUNT_TOLERANCE}). "
+            "estimate_output_frame_count가 실제 encode 결과와 다름 — 폭증 경고 부정확. "
+            "Task 4-3 미구현이거나 estimate 로직 오류."
+        )
+
+    @pytest.mark.xfail(
+        not _S4_HAS_ESTIMATE,
+        reason=_ESTIMATE_XFAIL_REASON,
+        strict=True,
+    )
+    @pytest.mark.skipif(not _S4_HAS_TIMEREMAP, reason=_MSG_S4_NO_TIMEREMAP)
+    def test_estimate_순수성_가드_imageio_미로드(self):
+        """Given: estimate_output_frame_count 호출
+        When:  imageio·torch·PySide6 없이 순수 호출
+        Then:  정상 반환 (ImportError 없음)
+
+        WHY: 사전계산 헬퍼는 순수 함수여야 한다(계획서 Task 4-3 "순수" 명시).
+             imageio/torch가 없어도 계산 가능해야 폭증 경고를 UI에서 미리 표시 가능.
+             이 테스트에서 ImportError가 발생하면 순수성 위반이다.
+        """
+        # given: segments=() 가장 단순한 입력
+        n_selected = _S4_N_FRAMES
+        segments: tuple = ()
+        fps = _S4_FPS
+
+        # when — 순수 함수이므로 어떤 IO 라이브러리 없이도 동작해야 함
+        try:
+            count = estimate_output_frame_count(n_selected, segments, fps)
+        except ImportError as exc:
+            pytest.fail(
+                f"estimate_output_frame_count에서 ImportError 발생: {exc}. "
+                "순수 함수 계약 위반 — imageio·torch·PySide6 import 금지."
+            )
+
+        # then
+        assert isinstance(count, int), (
+            f"반환 타입이 int가 아님: {type(count)}. "
+            "estimate_output_frame_count는 int를 반환해야 한다."
+        )
+
+
+# ===========================================================================
+# (선택) Task 4-2 — GIF 클램프 경고 표면화 (경고 가능 경로)
+# ===========================================================================
+class TestStory4GifClampWarning:
+    """Story 4 선택 요건: 패스트 구간 10ms 미만 시 GIF 클램프 경고 가능 경로.
+
+    WHY 선택: 계획서 "선택 사항(GIF 클램프 인덱스 노출)"이므로 미구현이어도
+    skip 처리(경고 없이). 단, 구현됐다면 클램프 경고 경로가 올바른지 검증한다.
+
+    클램프 경고 인터페이스 가정:
+      usecase.export()가 clamp_indices를 반환하거나,
+      별도 헬퍼 함수 get_gif_clamp_warning(n_selected, segments, fps) → list[int]를
+      noqa로 호출 가능하다고 가정한다.
+      실제 구현에 따라 시그니처가 달라질 수 있으므로 가정+주석 명시.
+    """
+
+    @pytest.mark.skipif(not _S4_HAS_TIMEREMAP, reason=_MSG_S4_NO_TIMEREMAP)
+    def test_패스트_구간_clamp_durations_for_gif가_클램프_인덱스를_반환한다(self):
+        """Given: n_selected=10, segments=(SpeedSegment(0,10,4.0),), fps=30
+        When:  build_playback_schedule + clamp_durations_for_gif 호출
+        Then:  clamped_indices 리스트가 비어 있지 않음 (10ms 미만 → 클램프 발생)
+
+        WHY: clamp_durations_for_gif는 이미 timeremap에 구현됨.
+             30fps × 4배속 → 1000/30/4 ≈ 8.3ms < 10ms → 클램프 대상.
+             이 테스트는 클램프 경고 경로의 기반 함수가 올바르게 동작하는지 확인한다.
+             usecase 레벨 경고 노출(§1-3)의 전제 조건 가드.
+        """
+        from easy_capture.core.timing.timeremap import (
+            build_playback_schedule,
+            clamp_durations_for_gif,
+        )
+
+        # 패스트 클램프 테스트 상수
+        _FAST_FPS = 30.0        # 기준 fps — 4배속 시 8.3ms → 클램프 필요
+        _FAST_FACTOR = 4.0
+        _N_FAST = 10
+        _FAST_SEG_END = 10
+
+        seg = _SpeedSegment(0, _FAST_SEG_END, _FAST_FACTOR)
+        schedule = build_playback_schedule(_N_FAST, [seg], _FAST_FPS)
+
+        # 클램프 전 duration 검증
+        raw_dur = (1000.0 / _FAST_FPS) / _FAST_FACTOR  # ≈ 8.33ms
+        assert raw_dur < 10.0, (
+            f"테스트 전제 조건 실패: raw_dur={raw_dur:.2f}ms >= 10ms. "
+            "클램프 시나리오가 아님."
+        )
+
+        # when
+        clamped_schedule, clamped_indices = clamp_durations_for_gif(schedule)
+
+        # then
+        assert len(clamped_indices) > 0, (
+            "패스트 구간에서 clamp_durations_for_gif가 clamped_indices를 반환하지 않음. "
+            "10ms 미만 duration이 발생했지만 클램프 인덱스가 빠짐."
+        )
+        # 클램프 후 모든 duration >= 20ms (역전 방지)
+        for i, dur in enumerate(clamped_schedule.durations_ms):
+            assert dur >= 20.0, (
+                f"클램프 후 프레임 {i} duration={dur}ms < 20ms. "
+                "clamp_durations_for_gif가 올바르게 클램프하지 않음."
+            )
+
+    @pytest.mark.skipif(not _S4_HAS_TIMEREMAP, reason=_MSG_S4_NO_TIMEREMAP)
+    def test_클램프_인덱스_목록이_실제_클램프된_프레임_번호와_일치한다(self):
+        """Given: 전체 구간 패스트(4배속), fps=30 → 전 프레임 클램프
+        When:  clamp_durations_for_gif 호출
+        Then:  clamped_indices 길이 == n_selected (전 프레임이 클램프됨)
+
+        WHY: 클램프 인덱스가 실제 클램프된 프레임 수와 정확히 일치해야
+             UI 경고 메시지가 "X개 프레임이 클램프됐습니다"라고 정확히 표시된다.
+        """
+        from easy_capture.core.timing.timeremap import (
+            build_playback_schedule,
+            clamp_durations_for_gif,
+        )
+
+        _FAST_FPS = 30.0
+        _FAST_FACTOR = 4.0
+        _N_FAST = _S4_N_FRAMES
+
+        seg = _SpeedSegment(0, _N_FAST, _FAST_FACTOR)
+        schedule = build_playback_schedule(_N_FAST, [seg], _FAST_FPS)
+        _, clamped_indices = clamp_durations_for_gif(schedule)
+
+        # 전 프레임이 클램프 대상 (8.3ms < 10ms)
+        assert len(clamped_indices) == _N_FAST, (
+            f"클램프 인덱스 수({len(clamped_indices)}) != 전체 프레임 수({_N_FAST}). "
+            "전 프레임 4배속 → 전 프레임 클램프 예상."
         )
