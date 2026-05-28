@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-28 (비디오 크롭 튜닝: 잘림·흔들림·GIF속도 수정 — Colab 재검증 권장)
+> 최종 업데이트: 2026-05-28 (슬로우모션 타임리맵 계획 — 페르소나 3인 컨펌, 구현 착수 예정)
 
 ---
 
@@ -73,7 +73,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`feature/video/crop-tuning` (크롭 잘림·흔들림·GIF속도 수정 — Colab 재검증 권장)
+`feature/video/speed-remap` (슬로우모션 타임리맵 계획 완료 — 페르소나 3인 컨펌, 구현 착수 예정)
 
 ### 완료 ✅
 
@@ -93,6 +93,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 | 구현 | **비디오 샷경계 재추적**(`feature/video/shot-retrack`): 컷 넘어 동일 인물 자동 재추적(ADR 0006). `core/crop.bbox_of_mask`, `core/tracking`(select_best_match·RematchResult·REMATCH_THRESHOLD·split_into_shots), `core/segmentation/detection_backend`(DetectionBackend Protocol stateless, ADR 0012), `infra/shot_detect`(PySceneDetect 경로 기반·**CPU 테스트 검증**), `infra/grounding_dino_backend`(재검출, 지연 로드), `app/video_capture.track(detector,cut_frames)`(샷 분할→경계 재검출→재매칭→재초기화·objid 유지/미달 needs_correction; propagate==샷수·detect==컷수 가드), router/UI 배선. **테스트 280개 통과**. ADR 0012 추가·0006 보완. 코드 리뷰 [치명적]1·[중요]3 반영(scenedetect API 2건·Grounding DINO 키워드·배선). **🔴 SAM2·Grounding DINO 실추론은 Colab GPU 검증 미완**. | ⏳ |
 | 구현 | **occlusion gap 정책 UI**(`feature/video/gap-policy-ui`): 추적 끊긴(occlusion) 프레임 처리 정책(배경 유지/컷/정지)을 UI에서 선택. `video_window` 갭 콤보 + export `gap_policy` 전달(백엔드 `build_output_indices` 기존 재사용). **테스트 284개 통과**(매핑 가드). gap_policy는 순수 로직 → **CPU 검증 완료(GPU 무관)**. | ✅ |
 | 구현 | **비디오 크롭 튜닝**(`feature/video/crop-tuning`, GPU 실검증 피드백): 크롭이 ① 피사체를 잘라먹고 ② 흔들리고 ③ GIF가 느리던 문제 수정. `compute_boxes`를 **마스크 bbox 최대×padding 자동 크기**(고정 320 제거 → 잘림 해소) + **bbox 중심**(centroid→자세 흔들림 완화), `_expand_to_aspect`로 종횡비 확대(잘림 방지). GIF `duration` 초→ms(imageio 2.28+, 재생속도 정상·조절). `subject_padding`·`smooth_window`·`GIF_FPS` 노출. **테스트 300개 통과**. **앱 검증 노트북**(`poc/colab/easy_capture_app_verify.ipynb`)으로 GPU 실검증 경로 확보(추적 OK 확인됨). | ✅ |
+| 기획 | **슬로우모션(타임리맵) 계획**(`feature/video/speed-remap`): 구간별 가변 재생속도(슬로우/패스트, 다중 구간) 설계 — `docs/plans/video-speed-remap-plan.md`. core 타임리맵 순수 로직(`PlaybackSchedule` 이중 표현) + GIF(per-frame duration·10ms 클램프) + MP4(프레임 복제) + UI(구간 테이블·미리보기→버튼). **페르소나 3인(영상전문가·PM·덕후) 2라운드 전원 컨펌**. ADR 0013 후보. MVP=프레임 복제(보간·오디오·트림+루프는 후속). | ✅ |
 
 ### 🔴 블로커
 - **GPU(CUDA) 사실상 필수**: PoC 실측상 SAM2 추적이 **CPU 에서 ≈0.10 fps**(프레임당 ~10초, 6초 클립에 ~14분). 현재 개발 PC 는 CPU 전용 → **실영상 추적·재추적 검증과 실사용에 GPU 환경 필요**. 하드웨어/클라우드 방향 결정 대기.
@@ -100,8 +101,9 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ### 미완료 (다음 작업 순서) ⏳
 1. **🔴 비디오 Colab GPU 검증 (최우선)**: 비디오 추적·샷경계 재추적 코드는 완료됐으나 SAM2 video·Grounding DINO 실추론 미검증. `poc/colab/`에서 ① 단일 샷 추적→크롭→GIF/MP4(리뷰 [중요]1 `post_process_masks` 원본 해상도 실효 확인), ② 컷 섞인 클립 샷경계 재추적(재매칭 통과/미달, threshold 0.5 보정) 검증. PoC H1 유지율(AC-01 ≥80%)·H2 재매칭(AC-03 ≥70%)·GPU fps(AC-06) → `poc/REPORT.md`.
 2. **SAM2+업스케일 이미지 모드 CPU 수동 스모크**: `python -m easy_capture` → 이미지 → 클릭 → 종횡비/크기 → (업스케일) 저장. 저장 크기 = 크롭 × 배율 단언.
-3. **비디오 후속 슬라이스**: 수동 교정 UI(needs_correction → `core/correction`) → 오디오 동기(H4) → 업스케일 결합 → 타임라인 고도화. (샷경계 재추적·Grounding DINO 재검출·occlusion gap UI 완료)
-4. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux`·`feature/image/upscale`·`feature/video/tracking-slice`·`feature/video/shot-retrack`·`feature/video/gap-policy-ui`·`feature/video/crop-tuning` → main PR/머지.
+3. **🎬 슬로우모션(타임리맵) 구현** (계획·페르소나 3인 컨펌 완료, 착수 예정): ADR 0013 → Story 1(`core/timing` 순수 로직) → GIF(per-frame duration) → MP4(프레임 복제) → export 결합 → UI 순, `/develop --tdd`. 계획서 `docs/plans/video-speed-remap-plan.md`. 잔여 구현 디테일: 미리보기 프레임 스크럽(prev/next), `schedule_to_cfr_indices` 선반영 주석, 저fps GIF 패스트 경고 문구.
+4. **비디오 후속 슬라이스**: 수동 교정 UI(needs_correction → `core/correction`) → 오디오 동기(H4) → 업스케일 결합 → 트림+슬로우+루프 → 타임라인 고도화. (샷경계 재추적·occlusion gap UI 완료)
+5. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux`·`feature/image/upscale`·`feature/video/tracking-slice`·`feature/video/shot-retrack`·`feature/video/gap-policy-ui`·`feature/video/crop-tuning`·`feature/video/speed-remap` → main PR/머지.
 
 ### PoC 핵심 결과 (요약)
 - SAM2(이미지+비디오)·Grounding DINO 는 **transformers 5.9.0 만으로** 사용 가능(별도 `sam2` 패키지 불필요).
