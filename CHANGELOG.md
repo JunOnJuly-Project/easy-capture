@@ -7,6 +7,15 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
 ## [미출시]
 
 ### 추가
+- **비디오 샷경계 재추적 — 컷 넘어 동일 인물 자동 재추적** (`feature/video/shot-retrack`, ADR 0006)
+  - `core/crop.bbox_of_mask`(마스크→bbox), `core/tracking`: `select_best_match`·`RematchResult`·`REMATCH_THRESHOLD=0.5`·`split_into_shots` 순수 함수.
+  - `core/segmentation/detection_backend`: `Detection`·`DetectionBackend` Protocol(stateless, ADR 0012).
+  - `infra/shot_detect`: PySceneDetect 컷 감지(경로 기반 `open_video`+`seek`+`detect_scenes`, CPU 테스트 검증).
+  - `infra/grounding_dino_backend`: Grounding DINO 재검출(지연 로드).
+  - `app/video_capture.track(detector, cut_frames)`: 샷 분할→경계 재검출→`rematch_score` 재매칭→통과 시 SAM2 재초기화·objid 유지, 미달 시 `needs_correction`. propagate==샷수·detect==컷수 회귀 가드. `detector=None` 하위호환.
+  - router/UI 배선(production 재추적 활성화), `needs_correction` 안내.
+  - 테스트 280개 통과. ADR 0012 추가·0006 보완. 코드 리뷰 [치명적] 1·[중요] 3 반영(scenedetect 0.7 API 2건·Grounding DINO `threshold` 키워드·프롬프트 마침표·배선).
+  - **주의**: SAM2 video·Grounding DINO 실추론은 GPU 필요 → Colab 검증 후행. threshold 0.5는 H2 실보정 대기.
 - **비디오(움짤) 모드 첫 수직 슬라이스 — 코드** (`feature/video/tracking-slice`)
   - 단일 샷 구간에서 클릭 대상을 추적해 크롭한 GIF/MP4 생성(척추 관통). 샷경계 재추적·Grounding DINO·오디오·업스케일 결합은 후속 슬라이스.
   - `core/segmentation/video_backend`: `VideoSegmentationBackend` Protocol(이미지와 분리·ISP, opaque session, ADR 0010).
