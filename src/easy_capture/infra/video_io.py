@@ -85,7 +85,7 @@ class _ImageFileSource:
             with Image.open(self._path) as img:
                 w, h = img.size
                 return FrameMeta(width=w, height=h, is_video=False, fps=None)
-        except (FileNotFoundError, UnidentifiedImageError, Exception) as exc:
+        except (FileNotFoundError, UnidentifiedImageError, OSError, ValueError) as exc:
             raise UnsupportedSourceError(
                 f"이미지 파일을 읽을 수 없습니다: {self._path}\n원인: {exc}"
             ) from exc
@@ -97,7 +97,7 @@ class _ImageFileSource:
         try:
             with Image.open(self._path) as img:
                 return np.array(img.convert("RGB"), dtype=np.uint8)
-        except (FileNotFoundError, UnidentifiedImageError, Exception) as exc:
+        except (FileNotFoundError, UnidentifiedImageError, OSError, ValueError) as exc:
             raise UnsupportedSourceError(
                 f"이미지 파일을 읽을 수 없습니다: {self._path}\n원인: {exc}"
             ) from exc
@@ -129,16 +129,18 @@ class _VideoFrameSource:
                 h = stream.codec_context.height
                 fps = float(stream.average_rate) if stream.average_rate else None
                 return FrameMeta(width=w, height=h, is_video=True, fps=fps)
-        except Exception as exc:
+        except (FileNotFoundError, OSError, ValueError, IndexError) as exc:
             raise UnsupportedSourceError(
                 f"동영상 파일을 읽을 수 없습니다: {self._path}\n원인: {exc}"
             ) from exc
 
     def read_frame(self, index: int = 0) -> np.ndarray:
-        """index 번째 프레임을 RGB BT.709 배열로 반환한다.
+        """동영상 첫 프레임을 RGB BT.709 배열로 반환한다.
 
-        WHY: PTS 시크를 사용하면 임의 프레임을 전체 디코드 없이 추출 가능하다.
-        이미지 모드 슬라이스에서는 index=0(첫 프레임)만 사용한다.
+        현재 슬라이스는 첫 프레임(index=0)만 지원한다.
+        index 인자는 차후 타임라인 슬라이스에서 PTS 시크로 구현 예정.
+        WHY: skip_frame="NONKEY" 제거 — 첫 프레임은 보통 키프레임이며
+             일부 컨테이너에서 빈 루프 위험이 있다(리뷰 [중요] 4).
         """
         try:
             import av
@@ -149,12 +151,9 @@ class _VideoFrameSource:
 
         try:
             with av.open(self._path) as container:
-                stream = container.streams.video[0]
-                stream.codec_context.skip_frame = "NONKEY"
                 for frame in container.decode(video=0):
-                    rgb = frame.to_ndarray(format="rgb24")
-                    return rgb.astype(np.uint8)
-        except Exception as exc:
+                    return frame.to_ndarray(format="rgb24").astype(np.uint8)
+        except (FileNotFoundError, OSError, ValueError) as exc:
             raise UnsupportedSourceError(
                 f"동영상 프레임을 디코드할 수 없습니다: {self._path}\n원인: {exc}"
             ) from exc
