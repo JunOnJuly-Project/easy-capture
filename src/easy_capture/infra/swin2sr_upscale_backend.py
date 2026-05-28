@@ -59,9 +59,13 @@ class Swin2srUpscaleBackend:
         """
         import torch
 
+        src_h, src_w = image_rgb.shape[:2]
         inputs = self._processor(image_rgb, return_tensors="pt").to(self.device)
         with torch.inference_mode():
             out = self._model(**inputs)
-        # reconstruction shape: (1, 3, H*scale, W*scale) float, 범위 [0,1]
-        recon_np = out.reconstruction[0].detach().cpu().float().numpy()  # (3, Hs, Ws)
-        return reconstruction_to_rgb_uint8(recon_np)
+        # WHY: Swin2SRImageProcessor가 입력을 8의 배수로 패딩하므로 출력은
+        #      (1, 3, H'*scale, W'*scale)(H'/W'=패딩 크기)일 수 있다. 원본 기준
+        #      (H*scale, W*scale)로 재크롭해 Protocol 계약 크기를 보장한다(리뷰 [중요]).
+        recon_np = out.reconstruction[0].detach().cpu().float().numpy()  # (3, H'*s, W'*s)
+        rgb = reconstruction_to_rgb_uint8(recon_np)
+        return rgb[: src_h * self.scale, : src_w * self.scale]
