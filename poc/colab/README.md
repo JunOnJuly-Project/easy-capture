@@ -42,3 +42,38 @@ https://colab.research.google.com/github/JunOnJuly-Project/easy-capture/blob/fea
 측정 수치를 `poc/REPORT.md` 의 "미검증" 항목에 채워 **Go/No-Go 확정**.
 
 > 노트북은 로컬 CPU 에서 API 호환성(transformers 5.x)을 검증한 뒤 작성했으나 GPU 실행은 미검증이다. 에러가 나면 **트레이스백을 공유**해 주면 바로 수정한다.
+
+---
+
+## easy_capture_app_verify.ipynb — 앱 코드 검증 노트북
+
+**기존 PoC 노트북의 크롭 버그(`crop=320:320:0:0` 좌상단 고정)를 재현하지 않도록**, 앱 패키지(`src/easy_capture`)의 공개 API를 직접 사용해 추적→크롭→GIF/MP4 파이프라인을 검증하는 노트북.
+
+### 기존 PoC 노트북과의 차이
+
+| 항목 | `easy_capture_gpu_poc.ipynb` | `easy_capture_app_verify.ipynb` |
+|------|-----------------------------|---------------------------------|
+| 크롭 방식 | `ffmpeg crop=320:320:0:0` 좌상단 고정 더미 | `VideoCaptureUseCase.compute_boxes()` — centroid 기반 추적 크롭 |
+| 코드 경로 | 인라인 스크립트 | **앱 패키지 공개 API 직접 사용** |
+| 주요 검증 | H1·H2·H4 PoC 검증 | **크롭 정합성 + AC-01 + AC-06** |
+
+### Colab 에서 열기
+
+```
+https://colab.research.google.com/github/JunOnJuly-Project/easy-capture/blob/feature/video/gap-policy-ui/poc/colab/easy_capture_app_verify.ipynb
+```
+
+### 순서
+
+1. **런타임 → 런타임 유형 변경 → GPU(T4)** 설정.
+2. 셀을 위에서 아래로 순서대로 실행.
+3. **짧은 MV/직캠 클립(≤10초 권장)** 업로드.
+4. 검출된 인물 그림에서 `TARGET_IDX` 지정.
+5. 결과 확인:
+   - 콘솔: **추적 유지율(AC-01) / GPU fps(AC-06)**
+   - `clip_crop.gif` / `clip_crop.mp4`: **피사체를 따라가는지** 육안 확인 (좌상단 고정이면 버그)
+   - `track_overlay.mp4`: 마스크 해상도 정합 확인
+
+### 결과 반영
+
+수치를 `poc/REPORT.md` 의 미검증 항목에 채워 **Go/No-Go 확정**.
