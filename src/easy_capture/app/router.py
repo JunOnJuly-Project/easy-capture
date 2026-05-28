@@ -1,7 +1,7 @@
 """모드 선택 → 메인 윈도우 라우팅 + 의존성 조립 루트(composition root).
 
-AppRouter가 구체 의존성(Sam2ImageBackend, open_source, Swin2srUpscaleBackend)을 조립해
-ImageCaptureUseCase와 ImageMainWindow에 주입한다.
+AppRouter가 구체 의존성(Sam2ImageBackend/Sam2VideoBackend, open_source, ...)을 조립해
+ImageCaptureUseCase/VideoCaptureUseCase와 대응 메인 윈도우에 주입한다.
 UI·유스케이스·infra를 처음으로 연결하는 단일 지점.
 """
 from __future__ import annotations
@@ -34,11 +34,7 @@ class AppRouter:
         if mode == "image":
             self._launch_image_mode()
         elif mode == "gif":
-            QMessageBox.information(
-                self._mode_window,
-                "준비 중",
-                "GIF(움짤) 모드는 아직 준비 중입니다.\n다음 업데이트를 기대해 주세요!",
-            )
+            self._launch_video_mode()
         else:
             QMessageBox.warning(
                 self._mode_window,
@@ -63,6 +59,23 @@ class AppRouter:
         if self._mode_window:
             self._mode_window.close()
 
+    def _launch_video_mode(self) -> None:
+        """비디오(GIF/MP4) 모드 의존성을 조립하고 메인 윈도우를 표시한다.
+
+        WHY: composition root — Sam2VideoBackend와 open_source를 조립해
+             VideoCaptureUseCase 팩토리를 VideoMainWindow에 주입한다.
+             이미지 모드 _launch_image_mode와 동형(DRY 구조 계승).
+        """
+        from easy_capture.infra.device import detect_device
+        from easy_capture.ui.video_window import VideoMainWindow
+
+        device = detect_device()
+        usecase_factory = self._build_video_usecase_factory(device)
+        self._main_window = VideoMainWindow(usecase_factory)
+        self._main_window.show()
+        if self._mode_window:
+            self._mode_window.close()
+
     def _build_usecase_factory(self, device: str):
         """파일 경로를 받아 ImageCaptureUseCase를 생성하는 팩토리를 반환한다.
 
@@ -81,6 +94,28 @@ class AppRouter:
         def factory(path: str) -> ImageCaptureUseCase:
             source = open_source(path)
             return ImageCaptureUseCase(source=source, backend=backend)
+
+        return factory
+
+    def _build_video_usecase_factory(self, device: str):
+        """파일 경로를 받아 VideoCaptureUseCase를 생성하는 팩토리를 반환한다.
+
+        WHY: 비디오 백엔드(Sam2VideoBackend)는 한 번만 생성해 재사용한다.
+             지연 로드이므로 생성 자체는 가볍다(모델 로드는 init_session 첫 호출 시).
+             이미지 모드 _build_usecase_factory와 동형(DRY 구조 계승).
+        """
+        from easy_capture.app.video_capture import VideoCaptureUseCase
+        from easy_capture.infra.device import select_sam2_repo
+        from easy_capture.infra.sam2_video_backend import Sam2VideoBackend
+        from easy_capture.infra.video_io import open_source
+
+        repo = select_sam2_repo(device)
+        # 비디오 백엔드는 지연 로드(ADR 0007 계승)
+        backend = Sam2VideoBackend(repo=repo, device=device)
+
+        def factory(path: str) -> VideoCaptureUseCase:
+            source = open_source(path)
+            return VideoCaptureUseCase(source=source, backend=backend)
 
         return factory
 
