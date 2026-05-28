@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-28 (슬로우모션 Story 1·2·3 — 타임리맵+GIF+MP4 인코딩 완료·main 머지, Story 4 진행 예정)
+> 최종 업데이트: 2026-05-28 (슬로우모션 Story 4 — export 결합 + estimate_output_frame_count 사전계산 완료)
 
 ---
 
@@ -104,7 +104,8 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
    - ✅ **ADR 0013 + Story 1**(`feature/timing/timeremap-core`): `core/timing/timeremap.py` 순수 로직 — `SpeedSegment`·`normalize_segments`·`PlaybackSchedule`(frame_indices·durations_ms tuple)·`build_playback_schedule`·`schedule_to_cfr_indices`·`clamp_durations_for_gif`. 테스트 53개(전체 355 통과). 코드 리뷰 [중요] 2 반영(CFR 잔여 가드·tuple화). segments=() 무회귀.
    - ✅ **Story 2**(`feature/export/gif-variable-duration`): `VideoExportConfig.segments` + `_encode_gif` 프레임별 duration(`build_playback_schedule`→`clamp_durations_for_gif` 연결, 10ms 클램프, loop=0 유지). 테스트 +7(전체 362). segments=() 무회귀. 리뷰 [중요] 0.
    - ✅ **Story 3**(`feature/export/mp4-frame-replication`): MP4 `_resolve_mp4_frames` — `schedule_to_cfr_indices`로 슬로우=프레임 복제·패스트=드롭(CFR). 테스트 +5(전체 367, ffmpeg 실인코딩). 단일 패스트 가드([중요1]) 실검증. segments=() 무회귀. 리뷰 [중요] 0.
-   - ⏳ 다음: Story 4(export 결합 — `VideoCaptureUseCase.export`에 segments 연결·output_indices↔schedule 2단계 인덱싱·클램프 경고 표면화, `feature/app/export-timeremap`) → Story 5(UI 구간 테이블·미리보기 버튼) → Story 6(노트북). 각 `/develop --tdd`, main에서 분기.
+   - ✅ **Story 4**(`feature/app/export-timeremap`): `estimate_output_frame_count(n_selected, segments, fps) → int` 순수 헬퍼 구현(`core/timing/timeremap.py`). `build_playback_schedule` + `schedule_to_cfr_indices` 위임으로 실제 MP4 출력 프레임 수 사전계산. 4 xfail → 379 passed. `core.timing.__init__` 공개 심볼 추가. export segments end-to-end는 기존 encode_frames 위임 구조(S2/S3)가 이미 처리. 무회귀.
+   - ⏳ 다음: Story 5(UI 구간 테이블·미리보기 버튼, `feature/ui/speed-segment-table`) → Story 6(노트북). 각 `/develop --tdd`, main에서 분기.
    - 📌 백로그(리뷰 [제안]): Story 3 가드 테스트 주석 "1프레임"→"1~2프레임" 정정, GIF fallback `1000/12.0` → `_DEFAULT_FPS` 상수화(GIF/MP4 일관).
    - 잔여 디테일: 미리보기 프레임 스크럽(prev/next, Story 5), 저fps GIF 패스트 경고 문구, [중요1] CFR 단일 패스트 가드는 Story 3에서 실인코딩 검증.
 2. **🔴 비디오 Colab GPU 검증** (병행 가능): SAM2 video·Grounding DINO **실추론** 미검증. `poc/colab/easy_capture_app_verify.ipynb`로 ① 단일 샷 추적→크롭→GIF/MP4(추적·크롭은 사용자 검증 OK), ② 컷 섞인 클립 샷경계 재추적(재매칭 통과/미달, threshold 0.5 보정) 검증. PoC H1·H2·GPU fps → `poc/REPORT.md`. (이미지 SAM2+업스케일은 실모델 CPU 스모크 완료)
