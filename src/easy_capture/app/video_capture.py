@@ -25,12 +25,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from easy_capture.core.crop import (
-    apply_aspect_lock,
     bbox_of_mask,
     centroid_of_mask,
     make_crop_box,
     smooth_centroids,
 )
+from easy_capture.core.crop.crop import ASPECT_PRESETS
 from easy_capture.core.export.video_export import (
     VideoExportConfig,
     crop_frames,
@@ -77,9 +77,10 @@ class TrackResult:
 class VideoCropParams:
     """프레임별 박스 계산 입력 묶음(매개변수 3개 규칙). 이미지 BoxParams 계승.
 
-    box_size: 요청 크롭 (W, H).
+    box_size: 최소 크롭 크기 하한 (W, H). 실제 크기는 피사체 bbox×padding 으로 자동 산출.
     aspect: 종횡비 프리셋 키('1:1', '9:16', '16:9') or None.
     smooth_window: smooth_centroids 이동평균 윈도 (기본 5).
+    subject_padding: 피사체 bbox 대비 여백 배수 (기본 1.3) — 잘림 방지.
 
     WHY: frozen=True로 불변. 슬라이더 변경마다 새 인스턴스를 생성하고
          이전 값은 버린다 — 실수 변경 방지.
@@ -88,6 +89,7 @@ class VideoCropParams:
     box_size: tuple[int, int]
     aspect: str | None
     smooth_window: int = 5
+    subject_padding: float = 1.3
 
 
 class VideoCaptureUseCase:
@@ -167,14 +169,19 @@ class VideoCaptureUseCase:
         params: VideoCropParams,
         frame_size: tuple[int, int],
     ) -> list[CropBox]:
-        """centroids → smooth → 프레임별 고정 크기 make_crop_box (순수·가벼움).
+        """마스크 bbox → 자동 고정 크기 + bbox 중심 smooth → make_crop_box (순수·가벼움).
 
         backend·detector를 절대 호출하지 않는다.
+
+        WHY: 중심을 centroid(무게중심) 대신 bbox 중심으로 잡아 자세 변화(팔·다리)
+             흔들림을 줄이고, 크기를 구간 내 최대 피사체 bbox×padding 으로 한 번 고정해
+             잘림(고정 box_size 한계)과 줌 흔들림을 동시에 없앤다(사용자 피드백).
         """
-        smoothed = smooth_centroids(result.centroids, params.smooth_window)
-        fixed_size = apply_aspect_lock(*params.box_size, params.aspect)
+        centers = [_bbox_center(m) for m in result.masks]
+        smoothed = smooth_centroids(centers, params.smooth_window)
+        size = _subject_fixed_size(result.masks, params, frame_size)
         return [
-            make_crop_box(c or _fallback_center(frame_size), fixed_size, frame_size)
+            make_crop_box(c or _fallback_center(frame_size), size, frame_size)
             for c in smoothed
         ]
 
@@ -380,3 +387,60 @@ def _fallback_center(frame_size: tuple[int, int]) -> tuple[float, float]:
     """centroid가 None(occlusion)일 때 프레임 중앙을 폴백 중심으로 반환한다."""
     w, h = frame_size
     return float(w / 2), float(h / 2)
+
+
+def _bbox_center(mask: np.ndarray) -> tuple[float, float] | None:
+    """마스크 bbox 중심 (cx, cy)를 반환한다. 빈 마스크면 None.
+
+    WHY: centroid(무게중심)는 팔·다리를 뻗으면 출렁이지만 bbox 중심은 안정적이라
+         크롭 위치 흔들림이 작다(사용자 피드백).
+    """
+    box = bbox_of_mask(mask)
+    if box is None:
+        return None
+    x1, y1, x2, y2 = box
+    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
+def _iter_bboxes(masks: list[np.ndarray]):
+    """마스크 리스트에서 유효(non-None) bbox만 순회한다."""
+    for mask in masks:
+        box = bbox_of_mask(mask)
+        if box is not None:
+            yield box
+
+
+def _subject_fixed_size(
+    masks: list[np.ndarray],
+    params: VideoCropParams,
+    frame_size: tuple[int, int],
+) -> tuple[int, int]:
+    """구간 내 마스크 bbox 최대 크기×padding 으로 고정 크롭 크기를 산출한다.
+
+    box_size를 최소 하한으로 적용(피사체가 작아도 과도하게 좁아지지 않게).
+    종횡비 적용 후 프레임 크기로 상한 클램프.
+    WHY: 전 프레임 동일 크기(고정) → 잘림·줌 흔들림 동시 해결(사용자 요구).
+    """
+    fw, fh = frame_size
+    max_w = max((b[2] - b[0] for b in _iter_bboxes(masks)), default=0)
+    max_h = max((b[3] - b[1] for b in _iter_bboxes(masks)), default=0)
+    w = max(int(max_w * params.subject_padding), params.box_size[0])
+    h = max(int(max_h * params.subject_padding), params.box_size[1])
+    w, h = _expand_to_aspect(w, h, params.aspect)
+    return min(w, fw), min(h, fh)
+
+
+def _expand_to_aspect(w: int, h: int, aspect: str | None) -> tuple[int, int]:
+    """피사체를 다 담도록 종횡비를 '확대' 방향으로 적용한다(축소 아님 — 잘림 방지).
+
+    WHY: apply_aspect_lock(축소)은 가로 긴 피사체를 1:1로 만들 때 가로를 잘라낸다.
+         여기선 짧은 변을 늘려 비율을 맞춰 피사체가 항상 박스 안에 들어오게 한다.
+    """
+    if aspect is None:
+        return w, h
+    aw, ah = ASPECT_PRESETS[aspect]
+    if w * ah > h * aw:        # 가로가 비율보다 넓음 → 세로를 늘려 맞춤
+        h = round(w * ah / aw)
+    else:                       # 세로가 비율보다 김 → 가로를 늘려 맞춤
+        w = round(h * aw / ah)
+    return int(w), int(h)

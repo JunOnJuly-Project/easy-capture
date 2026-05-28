@@ -70,7 +70,12 @@ except TypeError:
     _HAS_RETRACK_FIELDS = False
 
 # FakeDetectionBackend — fakes.py에 이미 추가됨
-from tests.fixtures.fakes import FakeDetectionBackend, FakeFrameSource, FakeVideoBackend
+from tests.fixtures.fakes import (
+    FakeDetectionBackend,
+    FakeFrameSource,
+    FakeVideoBackend,
+    _make_rect_mask,
+)
 
 # DetectionBackend Protocol — 구현 전 격리
 try:
@@ -1680,4 +1685,535 @@ class TestRetrackMultiCutAccumulation:
 
         assert len(result.centroids) == RETRACK_3SHOT_FRAMES, (
             f"centroids 길이 불일치: {len(result.centroids)} vs {RETRACK_3SHOT_FRAMES}"
+        )
+
+
+# ===========================================================================
+# 크롭 정책 변경 가드 — bbox 중심·자동 고정 크기·잘림·흔들림 해결
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 테스트 상수
+# ---------------------------------------------------------------------------
+# 큰 피사체 마스크 크기 (box_size 하한을 초과하는 크기)
+_LARGE_SUBJECT_HALF = 80          # 좌우/상하 각 80px → bbox 폭/높이 ≈ 160px
+_LARGE_SUBJECT_SIDE = _LARGE_SUBJECT_HALF * 2   # 160px
+
+# 작은 피사체 마스크 크기 (box_size 하한보다 작은 크기)
+_SMALL_SUBJECT_HALF = 5           # 좌우/상하 각 5px → bbox 폭/높이 ≈ 10px
+
+# padding 값 — VideoCropParams 기본값과 동일
+_DEFAULT_PADDING = 1.3
+
+# 계산 허용 오차 (픽셀 단위, 정수 반올림 등 오차)
+_SIZE_TOLERANCE = 2
+
+
+# ---------------------------------------------------------------------------
+# _bbox_center 단위 테스트
+# ---------------------------------------------------------------------------
+class TestBboxCenter:
+    """_bbox_center 헬퍼: bbox 중심 반환·빈 마스크 None 처리.
+
+    WHY: centroid(무게중심) 대신 bbox 중심을 사용해 자세 변화(팔·다리)
+         흔들림을 줄이는 핵심 정책 변경을 가드한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_사각_마스크_bbox_중심이_정확히_반환된다(self):
+        """Given: 중심 (cx=320, cy=180), half=20 사각형 bool 마스크
+        When:  _bbox_center(mask) 호출
+        Then:  반환값 (cx_out, cy_out)이 bbox 중심값과 일치한다 (±_SIZE_TOLERANCE)
+
+        WHY: bbox 중심이 마스크 픽셀 분포 평균(centroid)이 아닌 bbox 끝점
+             평균으로 계산되는지 확인한다. 팔을 뻗으면 bbox 중심은 흔들리지 않는다.
+        """
+        from easy_capture.app.video_capture import _bbox_center
+
+        # given
+        H, W = FAKE_FRAME_H, FAKE_FRAME_W
+        HALF = 20
+        CX, CY = 320, 180
+        mask = _make_rect_mask(H, W, CX, CY, half=HALF)
+
+        # when
+        result = _bbox_center(mask)
+
+        # then
+        assert result is not None, "유효 마스크에서 _bbox_center가 None을 반환함"
+        cx_out, cy_out = result
+        # bbox: x1=CX-HALF, x2=CX+HALF-1 → 중심 = (x1+x2)/2
+        expected_cx = (CX - HALF + CX + HALF - 1) / 2.0   # ≈ CX - 0.5
+        expected_cy = (CY - HALF + CY + HALF - 1) / 2.0
+        assert abs(cx_out - expected_cx) <= _SIZE_TOLERANCE, (
+            f"bbox 중심 X 불일치: {cx_out:.2f} vs 기대 {expected_cx:.2f}"
+        )
+        assert abs(cy_out - expected_cy) <= _SIZE_TOLERANCE, (
+            f"bbox 중심 Y 불일치: {cy_out:.2f} vs 기대 {expected_cy:.2f}"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_빈_마스크에서_bbox_center는_None을_반환한다(self):
+        """Given: 전부 False인 빈 bool 마스크
+        When:  _bbox_center(mask) 호출
+        Then:  None 반환 (유효 픽셀 없음)
+
+        WHY: occlusion 프레임은 빈 마스크를 가지며 None이 fallback_center를
+             통해 프레임 중앙 폴백 처리되는 흐름을 보장한다.
+        """
+        from easy_capture.app.video_capture import _bbox_center
+
+        # given
+        mask = np.zeros((FAKE_FRAME_H, FAKE_FRAME_W), dtype=bool)
+
+        # when
+        result = _bbox_center(mask)
+
+        # then
+        assert result is None, f"빈 마스크에서 None이 아닌 값 반환: {result}"
+
+
+# ---------------------------------------------------------------------------
+# _expand_to_aspect 단위 테스트
+# ---------------------------------------------------------------------------
+class TestExpandToAspect:
+    """_expand_to_aspect 헬퍼: 종횡비 '확대' 방향 적용 (축소 아님 — 잘림 방지).
+
+    WHY: apply_aspect_lock(축소 방향)과 반대로 짧은 변을 늘려 피사체가
+         항상 박스 안에 들어오게 한다. 이 동작을 가드하지 않으면 크롭이
+         피사체를 잘라낼 수 있다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_aspect_None이면_입력_크기를_그대로_반환한다(self):
+        """Given: w=200, h=150, aspect=None
+        When:  _expand_to_aspect(200, 150, None)
+        Then:  (200, 150) 반환 (변경 없음)
+
+        WHY: aspect=None은 종횡비 잠금 없음 — 원본 크기 보존 계약.
+        """
+        from easy_capture.app.video_capture import _expand_to_aspect
+
+        # when
+        w_out, h_out = _expand_to_aspect(200, 150, None)
+
+        # then
+        assert w_out == 200 and h_out == 150, (
+            f"aspect=None 시 크기 변경됨: ({w_out}, {h_out})"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_가로_긴_입력에_1대1_적용하면_입력_이상_크기가_된다(self):
+        """Given: w=200 > h=100 (가로 긴 피사체), aspect='1:1'
+        When:  _expand_to_aspect(200, 100, '1:1')
+        Then:  w_out >= 200, h_out >= 100 (축소 아님 — 잘림 방지)
+               결과가 1:1 비율 (w_out == h_out)
+
+        WHY: 가로 긴 피사체를 1:1로 만들 때 세로를 늘려야 한다.
+             apply_aspect_lock처럼 가로를 줄이면 피사체 좌우가 잘린다.
+        """
+        from easy_capture.app.video_capture import _expand_to_aspect
+
+        W_IN, H_IN = 200, 100
+
+        # when
+        w_out, h_out = _expand_to_aspect(W_IN, H_IN, "1:1")
+
+        # then: 축소 아님
+        assert w_out >= W_IN, f"가로가 줄어들었음(잘림 위험): {w_out} < {W_IN}"
+        assert h_out >= H_IN, f"세로가 줄어들었음(잘림 위험): {h_out} < {H_IN}"
+        # 1:1 비율
+        assert w_out == h_out, f"1:1 비율 불일치: w={w_out}, h={h_out}"
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_9대16_세로_긴_비율_방향이_올바르다(self):
+        """Given: w=100, h=100 (정방형), aspect='9:16'
+        When:  _expand_to_aspect(100, 100, '9:16')
+        Then:  h_out > w_out (세로가 더 긴 세로형 박스)
+               w_out >= 100, h_out >= 100 (축소 아님)
+
+        WHY: 9:16은 세로형(세로>가로) 비율이어야 한다.
+             방향이 반전되면 가로형 크롭이 나와 모바일 세로 영상에 부적합하다.
+        """
+        from easy_capture.app.video_capture import _expand_to_aspect
+
+        W_IN, H_IN = 100, 100
+
+        # when
+        w_out, h_out = _expand_to_aspect(W_IN, H_IN, "9:16")
+
+        # then
+        assert h_out > w_out, f"9:16 비율인데 세로({h_out})가 가로({w_out}) 이하"
+        assert w_out >= W_IN, f"가로 축소 감지: {w_out} < {W_IN}"
+        assert h_out >= H_IN, f"세로 축소 감지: {h_out} < {H_IN}"
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_16대9_가로_긴_비율_방향이_올바르다(self):
+        """Given: w=100, h=100 (정방형), aspect='16:9'
+        When:  _expand_to_aspect(100, 100, '16:9')
+        Then:  w_out > h_out (가로가 더 긴 가로형 박스)
+               w_out >= 100, h_out >= 100 (축소 아님)
+
+        WHY: 16:9는 가로형(가로>세로) 비율이어야 한다.
+        """
+        from easy_capture.app.video_capture import _expand_to_aspect
+
+        W_IN, H_IN = 100, 100
+
+        # when
+        w_out, h_out = _expand_to_aspect(W_IN, H_IN, "16:9")
+
+        # then
+        assert w_out > h_out, f"16:9 비율인데 가로({w_out})가 세로({h_out}) 이하"
+        assert w_out >= W_IN, f"가로 축소 감지: {w_out} < {W_IN}"
+        assert h_out >= H_IN, f"세로 축소 감지: {h_out} < {H_IN}"
+
+
+# ---------------------------------------------------------------------------
+# _subject_fixed_size 단위 테스트
+# ---------------------------------------------------------------------------
+class TestSubjectFixedSize:
+    """_subject_fixed_size 헬퍼: 구간 최대 피사체 bbox×padding 고정 크기 산출.
+
+    WHY: 이 함수가 box_size 하한·padding·frame_size 상한을 올바르게 결합해야
+         잘림·줌 흔들림이 동시에 해결된다. 각 속성을 독립 가드한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_큰_피사체는_box_size_하한을_초과하는_크기를_반환한다(self):
+        """Given: bbox 폭/높이 ≈ 160px인 큰 마스크, box_size=(80, 60)
+        When:  _subject_fixed_size 호출
+        Then:  반환 크기(W, H) 중 적어도 한 변이 box_size 하한보다 크다
+
+        WHY: 피사체가 box_size보다 크면 고정 box_size를 그대로 쓰면 잘린다.
+             자동 크기 산출이 box_size를 초과해야 한다(잘림 방지 핵심 조건).
+        """
+        from easy_capture.app.video_capture import _subject_fixed_size
+
+        # given: 큰 마스크 1개 (bbox ≈ 160×160)
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        large_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        masks = [large_mask]
+        params = VideoCropParams(
+            box_size=(80, 60),          # 하한: 80×60 — 피사체(160×160)보다 훨씬 작음
+            aspect=None,
+            subject_padding=_DEFAULT_PADDING,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        # when
+        w_out, h_out = _subject_fixed_size(masks, params, frame_size)
+
+        # then: 결과가 box_size 하한보다 커야 함
+        assert w_out > 80 or h_out > 60, (
+            f"큰 피사체인데 결과({w_out}×{h_out})가 box_size 하한(80×60)과 같거나 작음. "
+            "자동 크기 산출이 작동하지 않는다."
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_작은_피사체에는_box_size_하한이_적용된다(self):
+        """Given: bbox 폭/높이 ≈ 10px인 작은 마스크, box_size=(200, 150)
+        When:  _subject_fixed_size 호출
+        Then:  반환 크기가 box_size 하한 이상 (200, 150)
+
+        WHY: 피사체가 너무 작아도 과도하게 좁아지면 크롭이 의미 없어진다.
+             box_size는 최소 하한으로 반드시 보장돼야 한다.
+        """
+        from easy_capture.app.video_capture import _subject_fixed_size
+
+        # given: 작은 마스크 1개 (bbox ≈ 10×10)
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        small_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_SMALL_SUBJECT_HALF
+        )
+        masks = [small_mask]
+        params = VideoCropParams(
+            box_size=(BOX_W, BOX_H),    # 하한: 200×150 — 피사체(10×10)보다 훨씬 큼
+            aspect=None,
+            subject_padding=_DEFAULT_PADDING,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        # when
+        w_out, h_out = _subject_fixed_size(masks, params, frame_size)
+
+        # then: box_size 하한 이상
+        assert w_out >= BOX_W, (
+            f"작은 피사체에서 box_size 하한({BOX_W}) 미달: w={w_out}"
+        )
+        assert h_out >= BOX_H, (
+            f"작은 피사체에서 box_size 하한({BOX_H}) 미달: h={h_out}"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_padding이_크기에_반영된다(self):
+        """Given: bbox 폭/높이 ≈ 160px인 마스크, padding=1.3 vs padding=2.0
+        When:  padding만 다른 두 params로 _subject_fixed_size 호출
+        Then:  padding=2.0 결과가 padding=1.3 결과보다 크다
+
+        WHY: subject_padding 배수가 실제 크기에 반영돼야 피사체 주변 여백이
+             설정값대로 확보된다.
+        """
+        from easy_capture.app.video_capture import _subject_fixed_size
+
+        # given: 큰 마스크로 box_size 하한 초과 보장
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        large_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        masks = [large_mask]
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        params_small_padding = VideoCropParams(
+            box_size=(BOX_W, BOX_H),
+            aspect=None,
+            subject_padding=1.3,
+        )
+        params_large_padding = VideoCropParams(
+            box_size=(BOX_W, BOX_H),
+            aspect=None,
+            subject_padding=2.0,
+        )
+
+        # when
+        w_small, h_small = _subject_fixed_size(masks, params_small_padding, frame_size)
+        w_large, h_large = _subject_fixed_size(masks, params_large_padding, frame_size)
+
+        # then
+        assert w_large >= w_small and h_large >= h_small, (
+            f"padding=2.0 결과({w_large}×{h_large})가 "
+            f"padding=1.3 결과({w_small}×{h_small})보다 크거나 같아야 함"
+        )
+        # 적어도 한 변은 더 커야 함 (clamp로 같아질 수 있으므로 or 조건)
+        assert w_large > w_small or h_large > h_small, (
+            "padding 증가가 크기에 전혀 반영되지 않음 (frame_size 클램프가 없는 상황)"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_반환_크기가_피사체_bbox를_담는다(self):
+        """Given: bbox 폭/높이 = SUBJECT_SIDE인 마스크, aspect=None, padding=1.3
+        When:  _subject_fixed_size 호출
+        Then:  w_out >= 피사체 폭, h_out >= 피사체 높이 (clamp 전 조건)
+
+        WHY: 박스가 피사체보다 작으면 피사체가 잘린다. 이것이 패딩 확보의
+             본질적 의미다. clamp 전에 w/h >= 피사체 폭/높이를 보장해야 한다.
+        """
+        from easy_capture.app.video_capture import _subject_fixed_size
+
+        # given: 큰 마스크, 넉넉한 frame_size로 clamp 없게 설정
+        CX, CY = 500, 300
+        SUBJECT_SIDE = _LARGE_SUBJECT_SIDE  # 160px
+        large_mask = _make_rect_mask(
+            1000, 1000, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        masks = [large_mask]
+        params = VideoCropParams(
+            box_size=(50, 50),          # 작은 하한
+            aspect=None,
+            subject_padding=_DEFAULT_PADDING,
+        )
+        frame_size = (1000, 1000)       # 클램프 없게 충분히 큰 프레임
+
+        # when
+        w_out, h_out = _subject_fixed_size(masks, params, frame_size)
+
+        # then: 결과가 피사체 bbox 크기 이상
+        assert w_out >= SUBJECT_SIDE, (
+            f"w_out({w_out}) < 피사체 폭({SUBJECT_SIDE}) — 잘림 발생"
+        )
+        assert h_out >= SUBJECT_SIDE, (
+            f"h_out({h_out}) < 피사체 높이({SUBJECT_SIDE}) — 잘림 발생"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_frame_size_상한_클램프가_적용된다(self):
+        """Given: 매우 큰 padding으로 피사체 크기×padding이 frame_size를 초과
+        When:  _subject_fixed_size 호출
+        Then:  반환 크기가 frame_size 이하 (클램프 작동)
+
+        WHY: 박스가 프레임 크기를 초과하면 crop_array가 영역 밖을 슬라이스한다.
+             반드시 frame_size 내로 제한돼야 한다.
+        """
+        from easy_capture.app.video_capture import _subject_fixed_size
+
+        # given: 큰 마스크, 아주 큰 padding으로 frame_size 초과 유도
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        large_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        masks = [large_mask]
+        params = VideoCropParams(
+            box_size=(BOX_W, BOX_H),
+            aspect=None,
+            subject_padding=10.0,       # 극단적 padding — frame_size 초과 확실
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        # when
+        w_out, h_out = _subject_fixed_size(masks, params, frame_size)
+
+        # then: frame_size 이하
+        assert w_out <= FAKE_FRAME_W, (
+            f"w_out({w_out}) > frame_w({FAKE_FRAME_W}) — 클램프 미작동"
+        )
+        assert h_out <= FAKE_FRAME_H, (
+            f"h_out({h_out}) > frame_h({FAKE_FRAME_H}) — 클램프 미작동"
+        )
+
+
+# ---------------------------------------------------------------------------
+# compute_boxes 새 동작 — 큰 마스크 자동 크기·전 프레임 고정 크기 불변식
+# ---------------------------------------------------------------------------
+class TestComputeBoxesNewBehavior:
+    """compute_boxes 새 동작 가드: 피사체 bbox 기반 자동 크기.
+
+    WHY: box_size 고정값 대신 구간 최대 피사체 bbox×padding으로 자동 산출하는
+         정책 변경을 가드한다. 동시에 전 프레임 동일 크기 불변식도 유지 확인.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_큰_마스크_TrackResult에서_박스가_피사체를_담는다(self):
+        """Given: bbox≈160×160인 큰 마스크 10개로 TrackResult 직접 구성
+        When:  compute_boxes(result, params, frame_size) 호출
+        Then:  박스 크기(W, H)가 피사체 폭/높이 이상 (_LARGE_SUBJECT_SIDE)
+
+        WHY: 고정 320 box_size였다면 큰 피사체도 항상 320×...이 나왔지만,
+             자동 크기 산출은 피사체 bbox×padding에서 결정된다.
+             box_size 하한(80×60)보다 피사체가 크면 자동 크기가 사용됨을 확인.
+        """
+        # given: 큰 마스크로 직접 TrackResult 구성 (backend 미호출)
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        large_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        # bbox 중심 계산: (CX-HALF+CX+HALF-1)/2, (CY-HALF+CY+HALF-1)/2
+        bbox_cx = (CX - _LARGE_SUBJECT_HALF + CX + _LARGE_SUBJECT_HALF - 1) / 2.0
+        bbox_cy = (CY - _LARGE_SUBJECT_HALF + CY + _LARGE_SUBJECT_HALF - 1) / 2.0
+        masks = [large_mask] * FRAME_COUNT
+        centroids = [(bbox_cx, bbox_cy)] * FRAME_COUNT
+        result = TrackResult(
+            masks=masks,
+            centroids=centroids,
+            needs_correction=[False] * FRAME_COUNT,
+            cut_frames=[],
+        )
+        params = VideoCropParams(
+            box_size=(80, 60),          # 하한: 작게 설정해 자동 크기 주도되게
+            aspect=None,
+            smooth_window=1,
+            subject_padding=_DEFAULT_PADDING,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        # when: VideoCaptureUseCase.compute_boxes는 순수 — backend 없이 직접 호출
+        usecase, backend = _make_usecase()
+        frames = _make_frames(FRAME_COUNT)
+        _ = usecase.track(frames, (CLICK_X, CLICK_Y))   # backend 1회 사용
+        # compute_boxes는 직접 result 주입으로 독립 호출
+        boxes = usecase.compute_boxes(result, params, frame_size)
+
+        # then: 박스 크기가 피사체 bbox 이상
+        bw = boxes[0][2] - boxes[0][0]
+        bh = boxes[0][3] - boxes[0][1]
+        assert bw >= _LARGE_SUBJECT_SIDE, (
+            f"박스 폭({bw}) < 피사체 폭({_LARGE_SUBJECT_SIDE}) — 피사체 잘림"
+        )
+        assert bh >= _LARGE_SUBJECT_SIDE, (
+            f"박스 높이({bh}) < 피사체 높이({_LARGE_SUBJECT_SIDE}) — 피사체 잘림"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_큰_마스크_TrackResult에서_전_프레임_박스_크기가_동일하다(self):
+        """Given: 큰 마스크로 구성한 TrackResult
+        When:  compute_boxes 호출
+        Then:  모든 프레임 박스 크기(W, H)가 동일 (GIF/MP4 인코딩 불변식)
+
+        WHY: 자동 크기 산출이 구간 최대값으로 고정되므로 전 프레임이 동일해야 한다.
+             크기가 프레임마다 다르면 encode_frames가 ValueError를 발생시킨다.
+        """
+        # given
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        large_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        masks = [large_mask] * FRAME_COUNT
+        bbox_cx = (CX - _LARGE_SUBJECT_HALF + CX + _LARGE_SUBJECT_HALF - 1) / 2.0
+        bbox_cy = (CY - _LARGE_SUBJECT_HALF + CY + _LARGE_SUBJECT_HALF - 1) / 2.0
+        centroids = [(bbox_cx, bbox_cy)] * FRAME_COUNT
+        result = TrackResult(
+            masks=masks,
+            centroids=centroids,
+            needs_correction=[False] * FRAME_COUNT,
+            cut_frames=[],
+        )
+        params = VideoCropParams(
+            box_size=(80, 60),
+            aspect=None,
+            smooth_window=1,
+            subject_padding=_DEFAULT_PADDING,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        # when
+        usecase, _ = _make_usecase()
+        frames = _make_frames(FRAME_COUNT)
+        usecase.track(frames, (CLICK_X, CLICK_Y))
+        boxes = usecase.compute_boxes(result, params, frame_size)
+
+        # then: 전 프레임 동일 크기
+        sizes = {(b[2] - b[0], b[3] - b[1]) for b in boxes}
+        assert len(sizes) == 1, (
+            f"전 프레임 박스 크기 불일치: {sizes} — GIF/MP4 인코딩 불변식 위반"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_compute_boxes_큰_마스크_결과에서도_backend_미호출_순수성이_유지된다(self):
+        """Given: 큰 마스크 TrackResult + track 완료 후 카운터 기준값 포착
+        When:  compute_boxes를 COMPUTE_BOXES_REPEAT회 반복 호출
+        Then:  backend.propagate_call_count가 track 직후 값과 동일 (재추적 없음)
+
+        WHY: 피사체가 크더라도 compute_boxes는 backend를 호출하지 않아야 한다.
+             새 자동 크기 산출 로직(_subject_fixed_size)이 순수 함수임을 강제한다.
+        """
+        # given
+        CX, CY = FAKE_FRAME_W // 2, FAKE_FRAME_H // 2
+        large_mask = _make_rect_mask(
+            FAKE_FRAME_H, FAKE_FRAME_W, CX, CY, half=_LARGE_SUBJECT_HALF
+        )
+        masks = [large_mask] * FRAME_COUNT
+        bbox_cx = (CX - _LARGE_SUBJECT_HALF + CX + _LARGE_SUBJECT_HALF - 1) / 2.0
+        bbox_cy = (CY - _LARGE_SUBJECT_HALF + CY + _LARGE_SUBJECT_HALF - 1) / 2.0
+        centroids = [(bbox_cx, bbox_cy)] * FRAME_COUNT
+        large_result = TrackResult(
+            masks=masks,
+            centroids=centroids,
+            needs_correction=[False] * FRAME_COUNT,
+            cut_frames=[],
+        )
+        usecase, backend = _make_usecase()
+        frames = _make_frames(FRAME_COUNT)
+        usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        # track 직후 카운터 기준값 포착
+        propagate_base = backend.propagate_call_count
+
+        params = VideoCropParams(
+            box_size=(80, 60),
+            aspect=None,
+            smooth_window=1,
+            subject_padding=_DEFAULT_PADDING,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        # when: 반복 호출
+        for _ in range(COMPUTE_BOXES_REPEAT):
+            usecase.compute_boxes(large_result, params, frame_size)
+
+        # then: 카운터 불변
+        assert backend.propagate_call_count == propagate_base, (
+            f"큰 마스크 compute_boxes 반복 중 propagate 재호출 감지: "
+            f"{backend.propagate_call_count} vs 기준 {propagate_base}. "
+            "compute_boxes는 순수 함수여야 한다."
         )
