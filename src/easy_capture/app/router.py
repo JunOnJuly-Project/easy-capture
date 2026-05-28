@@ -100,22 +100,25 @@ class AppRouter:
     def _build_video_usecase_factory(self, device: str):
         """파일 경로를 받아 VideoCaptureUseCase를 생성하는 팩토리를 반환한다.
 
-        WHY: 비디오 백엔드(Sam2VideoBackend)는 한 번만 생성해 재사용한다.
-             지연 로드이므로 생성 자체는 가볍다(모델 로드는 init_session 첫 호출 시).
+        WHY: 비디오 백엔드(Sam2VideoBackend) + 재검출 백엔드(GroundingDinoBackend)를
+             둘 다 조립해 detector 파라미터로 주입한다(ADR 0012, [중요] 2 수정).
+             두 백엔드 모두 지연 로드이므로 생성 자체는 가볍다(ADR 0007 계승).
              이미지 모드 _build_usecase_factory와 동형(DRY 구조 계승).
         """
         from easy_capture.app.video_capture import VideoCaptureUseCase
         from easy_capture.infra.device import select_sam2_repo
+        from easy_capture.infra.grounding_dino_backend import GroundingDinoBackend
         from easy_capture.infra.sam2_video_backend import Sam2VideoBackend
         from easy_capture.infra.video_io import open_source
 
         repo = select_sam2_repo(device)
-        # 비디오 백엔드는 지연 로드(ADR 0007 계승)
+        # 두 백엔드 모두 지연 로드(ADR 0007 계승) — 생성 자체는 가볍다
         backend = Sam2VideoBackend(repo=repo, device=device)
+        detector = GroundingDinoBackend(device=device)
 
         def factory(path: str) -> VideoCaptureUseCase:
             source = open_source(path)
-            return VideoCaptureUseCase(source=source, backend=backend)
+            return VideoCaptureUseCase(source=source, backend=backend, detector=detector)
 
         return factory
 

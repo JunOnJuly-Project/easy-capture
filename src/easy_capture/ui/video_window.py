@@ -65,31 +65,71 @@ _DEFAULT_FRAME_LIMIT = 3000   # fps 없는 경우 관대한 상한 (프레임)
 class _TrackWorker(QThread):
     """VideoCaptureUseCase.track을 백그라운드에서 실행하는 워커.
 
-    WHY: SAM2 video 전파(propagate)는 GPU에서도 수 초 걸린다.
-         메인 스레드 실행 시 UI가 얼기 때문에 QThread로 분리.
+    WHY: SAM2 video 전파(propagate)·Grounding DINO 검출(detect)은 GPU에서도
+         수 초 걸린다. 메인 스레드 실행 시 UI가 얼기 때문에 QThread로 분리.
          _SegWorker(이미지 모드) 패턴을 그대로 계승: Signal·run·예외 처리 동형.
+
+    배선 흐름([중요] 2 수정):
+      1. shot_detect.detect_cut_frames(video_path, start_frame, end_frame)으로
+         구간 내 컷 프레임 인덱스를 구한다(detector 있을 때만).
+      2. track(frames, point, cut_frames=...)으로 샷 경계 재추적을 실행한다.
+      WHY: shot_detect가 경로 기반이 됐으므로 파일 경로·구간 정보를
+           VideoMainWindow → _TrackWorker로 전달해야 한다.
     """
 
     track_ready = Signal(object)  # TrackResult
     error = Signal(str)           # 한국어 오류 메시지
 
-    def __init__(self, usecase, frames, point) -> None:
+    def __init__(self, usecase, frames, point, video_path=None, span=None) -> None:
+        """워커 초기화.
+
+        Args:
+            usecase:    VideoCaptureUseCase 인스턴스.
+            frames:     구간 전체 프레임 리스트.
+            point:      클릭 좌표 (x, y).
+            video_path: 비디오 파일 경로(shot_detect 입력용, None이면 컷 감지 생략).
+            span:       FrameSpan(start, end) 구간(shot_detect 입력용).
+        """
         super().__init__()
         self._usecase = usecase
         self._frames = frames
         self._point = point
+        self._video_path = video_path
+        self._span = span
 
     def run(self) -> None:
-        """usecase.track을 워커 스레드에서 실행한다."""
+        """shot_detect → cut_frames → usecase.track을 워커 스레드에서 실행한다."""
         from easy_capture.core.segmentation.video_backend import EmptyTrackError
 
         try:
-            result = self._usecase.track(self._frames, self._point)
+            cut_frames = self._detect_cuts()
+            result = self._usecase.track(self._frames, self._point, cut_frames=cut_frames)
             self.track_ready.emit(result)
         except EmptyTrackError as exc:
             self.error.emit(f"[빈마스크] {exc}")
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"추적 오류: {exc}")
+
+    def _detect_cuts(self) -> list[int] | None:
+        """detector가 있고 파일 경로가 있으면 컷 프레임 인덱스를 구한다.
+
+        WHY: detector=None이면 컷 감지를 건너뛰어 단일 샷 경로로 폴백한다.
+             파일 경로·구간이 없으면(테스트·이미지 소스) 마찬가지로 None 반환.
+        """
+        if self._video_path is None or self._span is None:
+            return None
+        if getattr(self._usecase, "_detector", None) is None:
+            return None
+        try:
+            from easy_capture.infra.shot_detect import detect_cut_frames
+            return detect_cut_frames(
+                self._video_path,
+                start_frame=self._span.start,
+                end_frame=self._span.end,
+            )
+        except Exception:  # noqa: BLE001
+            # 컷 감지 실패 시 단일 샷 폴백 — 추적 자체를 막지 않는다
+            return None
 
 
 class _ExportWorker(QThread):
@@ -143,6 +183,9 @@ class VideoMainWindow(QMainWindow):
         self._total_frames: int = 0
         # 리뷰 [제안]: __init__에서 None으로 선언해 hasattr 대신 is not None 검사
         self._pending_point: tuple[int, int] | None = None
+        # shot_detect 배선용 — 파일 경로·구간 보관([중요] 2 수정)
+        self._video_path: str | None = None
+        self._pending_span = None  # FrameSpan
 
         # 워커
         self._track_worker: _TrackWorker | None = None
@@ -279,6 +322,7 @@ class VideoMainWindow(QMainWindow):
             return
         try:
             self._usecase = self._usecase_factory(path)
+            self._video_path = path  # shot_detect 배선용 보관
             # WHY: usecase 공개 API probe_meta() 사용 — 비공개 _source 관통 금지(리뷰 [중요] 3)
             meta = self._usecase.probe_meta()
             self._total_frames = _estimate_frame_count(meta)
@@ -305,7 +349,7 @@ class VideoMainWindow(QMainWindow):
             self._set_status("추적 중입니다. 잠시만 기다려 주세요.")
             return
         try:
-            self._frames = self._load_span_frames()
+            self._frames, self._pending_span = self._load_span_frames_with_span()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "구간 로드 실패", str(exc))
             return
@@ -326,7 +370,11 @@ class VideoMainWindow(QMainWindow):
         )
         self._track_btn.setEnabled(False)
         self._track_worker = _TrackWorker(
-            self._usecase, self._frames, self._pending_point
+            self._usecase,
+            self._frames,
+            self._pending_point,
+            video_path=self._video_path,
+            span=self._pending_span,
         )
         self._track_worker.track_ready.connect(self._on_track_ready)
         self._track_worker.error.connect(self._on_track_error)
@@ -449,6 +497,15 @@ class VideoMainWindow(QMainWindow):
 
         WHY: usecase 공개 API read_span_frames() 사용 — 비공개 _source 관통 금지(리뷰 [중요] 3).
         """
+        frames, _ = self._load_span_frames_with_span()
+        return frames
+
+    def _load_span_frames_with_span(self):
+        """현재 구간 설정으로 프레임 시퀀스와 FrameSpan을 함께 반환한다.
+
+        WHY: _TrackWorker가 shot_detect 호출을 위해 FrameSpan을 필요로 하므로
+             프레임과 함께 span을 반환한다([중요] 2 수정).
+        """
         from easy_capture.infra.video_io import FrameSpan
 
         start = self._span_start.value()
@@ -456,7 +513,7 @@ class VideoMainWindow(QMainWindow):
         if end <= start:
             raise ValueError("끝 프레임이 시작 프레임보다 커야 합니다.")
         span = FrameSpan(start=start, end=end)
-        return self._usecase.read_span_frames(span)
+        return self._usecase.read_span_frames(span), span
 
     def _recompute_boxes(self) -> None:
         """보관된 TrackResult + 현재 params로 박스를 즉시 재계산한다.
