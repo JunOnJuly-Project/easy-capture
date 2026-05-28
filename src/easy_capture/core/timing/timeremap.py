@@ -233,6 +233,35 @@ def schedule_to_cfr_indices(schedule: PlaybackSchedule) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# estimate_output_frame_count — MP4 CFR 출력 프레임 수 사전계산 헬퍼
+# ---------------------------------------------------------------------------
+def estimate_output_frame_count(
+    n_selected: int,
+    segments: tuple | list,
+    fps: float,
+) -> int:
+    """선택된 프레임 수 + 구간 배속 + fps → 예상 MP4 출력 프레임 수(순수).
+
+    segments=() → n_selected 그대로 반환(항등).
+    슬로우 구간이 있으면 복제 수만큼 증가, 패스트 구간이 있으면 드롭만큼 감소.
+
+    WHY 순수 함수: imageio·torch·PySide6 비의존 — UI에서 인코딩 전 경고 표시 가능.
+    WHY schedule_to_cfr_indices 위임: 실제 encode와 동일 로직 재사용 — 오차 최소화.
+    폭증 경고(GIF·MP4 용량) 사전 계산에 사용된다. ADR 0013 Task 4-3 참조.
+
+    Args:
+        n_selected: 선택된(gap_policy 출력) 프레임 수.
+        segments:   SpeedSegment 시퀀스 (tuple 또는 list). 빈 시퀀스 허용.
+        fps:        기준 출력 fps.
+
+    Returns:
+        예상 MP4 출력 프레임 수 (int).
+    """
+    schedule = build_playback_schedule(n_selected, list(segments), fps)
+    return len(schedule_to_cfr_indices(schedule))
+
+
+# ---------------------------------------------------------------------------
 # clamp_durations_for_gif — GIF 10ms 하한 가드
 # ---------------------------------------------------------------------------
 def clamp_durations_for_gif(
