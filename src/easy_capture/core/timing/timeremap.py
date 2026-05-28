@@ -262,6 +262,100 @@ def estimate_output_frame_count(
 
 
 # ---------------------------------------------------------------------------
+# TrimRange — 출력 트림 구간 값객체(불변)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class TrimRange:
+    """출력 트림 구간 값객체(불변). 출력 시퀀스 상대 [start, end) 좌표계.
+
+    start: 시작(포함). end: 끝(미포함).
+
+    WHY frozen=True: SpeedSegment와 동일한 불변 값객체 계약.
+      생성 후 변경 불가하므로 해시 가능하고 안전하게 공유된다.
+    WHY "출력 시퀀스 상대" [0, n): trim·segments 좌표는 encode_frames에 전달되는
+      출력 crops 시퀀스 기준이다. gap_policy=BACKGROUND에서는 crops가 span 전체와
+      동일해 span 상대와 일치한다. CUT/FREEZE에서는 build_output_indices가 갭을
+      제거해 crops가 압축되므로 span 상대와 어긋난다. 즉 현재 구현은 BACKGROUND
+      전제로만 trim/segments 좌표 정합을 보장한다(잠복 — ADR 0013의 2단계 인덱싱
+      미구현 추적).
+    """
+
+    start: int
+    end: int
+
+
+# ---------------------------------------------------------------------------
+# slice_for_trim — 트림 구간 슬라이스(순수)
+# ---------------------------------------------------------------------------
+def slice_for_trim(items: list, trim: TrimRange | None) -> list:
+    """trim 구간으로 리스트를 슬라이스한다(순수).
+
+    trim=None → items 그대로 반환(항등, 무회귀 경로).
+    trim 지정 → items[trim.start:trim.end] 새 리스트 반환.
+
+    WHY 항등 경로: trim=None은 "트림 안 함"이므로 기존 동작을 보존한다.
+    WHY 슬라이스 새 객체: 원본 mutate를 막아 부수효과 없음 계약을 지킨다.
+    """
+    if trim is None:
+        return items
+    return items[trim.start:trim.end]
+
+
+# ---------------------------------------------------------------------------
+# shift_segments_into_trim — 트림-로컬 평행이동·클리핑(순수)
+# ---------------------------------------------------------------------------
+def shift_segments_into_trim(segments, trim: TrimRange | None):
+    """segments를 트림-로컬 좌표 [0, M)로 평행이동·클리핑한다(순수).
+
+    trim=None → segments 그대로 반환(항등, 무회귀 경로).
+    trim 지정 → 각 seg를 [trim.start, trim.end)와 교집합 후 trim.start만큼
+    빼서 트림-로컬 좌표로 옮긴다. 교집합이 비면(트림 밖) 드롭한다. factor 보존.
+
+    WHY 트림-로컬: 트림을 먼저 적용해 새 원점(0)이 trim.start가 되므로
+      segments도 동일 원점 기준으로 평행이동해야 위치가 맞는다(planner 적용 순서).
+    """
+    if trim is None:
+        return segments
+    shifted = (_clip_segment_into_trim(seg, trim) for seg in segments)
+    return tuple(seg for seg in shifted if seg is not None)
+
+
+def _clip_segment_into_trim(seg: SpeedSegment, trim: TrimRange):
+    """seg를 트림과 교집합 후 트림-로컬 좌표로 옮긴 SpeedSegment 반환.
+
+    교집합이 비면(lo >= hi) None을 반환해 호출부가 드롭하게 한다.
+    WHY 헬퍼 분리: shift_segments_into_trim 20줄·단일 책임 유지.
+    """
+    lo = max(seg.start, trim.start) - trim.start
+    hi = min(seg.end, trim.end) - trim.start
+    if lo < hi:
+        return SpeedSegment(start=lo, end=hi, factor=seg.factor)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# validate_trim — 트림 범위 검증(순수)
+# ---------------------------------------------------------------------------
+def validate_trim(trim: TrimRange | None, n_frames: int) -> None:
+    """트림 범위를 검증한다(순수). 위반 시 한국어 ValueError.
+
+    trim=None → 통과(검증 대상 아님).
+    유효 조건: 0 <= start < end <= n_frames.
+
+    WHY 검증 필요: 범위 밖 트림은 슬라이스가 빈 결과·역전 결과를 내
+      움짤이 비거나 의도와 달라진다. 인코딩 전 조기 차단한다.
+    WHY 한국어 + 수치: 사용자 대면 에러 정책 + 어디가 잘못됐는지 알려준다.
+    """
+    if trim is None:
+        return
+    if not (0 <= trim.start < trim.end <= n_frames):
+        raise ValueError(
+            f"트림 범위가 올바르지 않습니다: [{trim.start},{trim.end}). "
+            f"0 <= 시작 < 끝 <= n_frames({n_frames}) 조건을 만족해야 합니다."
+        )
+
+
+# ---------------------------------------------------------------------------
 # clamp_durations_for_gif — GIF 10ms 하한 가드
 # ---------------------------------------------------------------------------
 def clamp_durations_for_gif(

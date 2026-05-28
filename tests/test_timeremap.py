@@ -45,7 +45,34 @@ except ModuleNotFoundError:
     clamp_durations_for_gif = None  # type: ignore[assignment,misc]
     _HAS_TIMEREMAP = False
 
+# ---------------------------------------------------------------------------
+# 트림 슬라이스 심볼 격리 — 미구현 시 XFAIL RED (timeremap 모듈은 존재하므로 별도 격리)
+# ---------------------------------------------------------------------------
+# WHY 별도 try/except:
+#   timeremap 모듈 자체는 이미 존재하므로 위 import는 성공한다.
+#   TrimRange/slice_for_trim/shift_segments_into_trim/validate_trim 는
+#   아직 추가되지 않은 신규 심볼이라 ImportError(ModuleNotFoundError 아님)로 실패한다.
+#   _HAS_TRIM 플래그로 분리해 트림 테스트만 정확히 XFAIL 처리한다.
+try:
+    from easy_capture.core.timing.timeremap import (
+        TrimRange,
+        shift_segments_into_trim,
+        slice_for_trim,
+        validate_trim,
+    )
+    _HAS_TRIM = True
+except ImportError:
+    TrimRange = None  # type: ignore[assignment,misc]
+    slice_for_trim = None  # type: ignore[assignment,misc]
+    shift_segments_into_trim = None  # type: ignore[assignment,misc]
+    validate_trim = None  # type: ignore[assignment,misc]
+    _HAS_TRIM = False
+
 _MSG_NOT_IMPL = "easy_capture.core.timing.timeremap 미구현 — RED 예상"
+_MSG_TRIM_NOT_IMPL = (
+    "TrimRange/slice_for_trim/shift_segments_into_trim/validate_trim "
+    "미구현 — 트림 슬라이스 RED 예상"
+)
 
 
 def _require_timeremap() -> None:
@@ -56,6 +83,17 @@ def _require_timeremap() -> None:
     """
     if not _HAS_TIMEREMAP:
         pytest.xfail(_MSG_NOT_IMPL)
+
+
+def _require_trim() -> None:
+    """트림 슬라이스 테스트 본문 첫 줄에 호출 — 미구현이면 xfail 로 RED 표시.
+
+    WHY: 트림 심볼은 timeremap 모듈에 추가될 신규 함수/클래스다.
+         구현 전이므로 ImportError로 _HAS_TRIM=False → XFAIL(예상된 RED).
+         구현 완료 시 자동으로 XPASS → 데코레이터 제거만 하면 GREEN.
+    """
+    if not _HAS_TRIM:
+        pytest.xfail(_MSG_TRIM_NOT_IMPL)
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +127,14 @@ GIF_CLAMP_DURATION_MS = 20.0
 
 # 부동소수 비교 허용 오차
 APPROX_REL = 1e-6
+
+# 트림 슬라이스 테스트 상수 (매직넘버 금지)
+# 모든 좌표는 span 상대 [0, n) 단일 좌표계 (planner 설계 확정안).
+TRIM_START_2 = 2          # 트림 시작 인덱스 (포함)
+TRIM_END_5 = 5            # 트림 끝 인덱스 (미포함) → 길이 3
+TRIM_END_8 = 8           # 더 넓은 트림 끝 (미포함)
+TRIM_LEN_3 = 3           # trim=(2,5) 길이
+LIST_LEN_10 = 10         # slice_for_trim 대상 리스트 길이
 
 
 # ===========================================================================
@@ -1161,3 +1207,295 @@ class TestEdgeCasesZeroFrames:
         assert clamped.frame_indices == ()
         assert clamped.durations_ms == ()
         assert clamp_indices == []
+
+
+# ===========================================================================
+# 10. TrimRange frozen dataclass 계약 (트림 슬라이스 — RED)
+# ===========================================================================
+class TestTrimRange:
+    """TrimRange(start, end) frozen dataclass 기본 계약.
+
+    span 상대 [start, end) (start 포함, end 미포함) — segments와 동일 단일 좌표계.
+    planner 설계 확정안: 트림·segments 모두 span 상대 [0, n).
+    """
+
+    def test_정상_인수로_생성하면_start_end가_보관된다(self):
+        """Given: start=2, end=5
+        When:  TrimRange 생성
+        Then:  start/end 필드가 전달값과 일치한다.
+
+        WHY: 트림 구간 값객체의 기본 계약. [start, end) 보관 정확성이 최우선.
+        """
+        _require_trim()
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_5)
+
+        assert trim.start == TRIM_START_2
+        assert trim.end == TRIM_END_5
+
+    def test_frozen이므로_필드_변경_시_예외를_던진다(self):
+        """Given: 생성된 TrimRange
+        When:  start 필드를 변경 시도
+        Then:  FrozenInstanceError(AttributeError 서브클래스) 발생
+
+        WHY: 불변 값객체 보장 — @dataclass(frozen=True) 준수.
+             SpeedSegment frozen 패턴과 동일하게 (AttributeError, TypeError)를 허용.
+        """
+        _require_trim()
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_5)
+
+        with pytest.raises((AttributeError, TypeError)):
+            trim.start = 3  # type: ignore[misc]
+
+    def test_동일_값_두_인스턴스는_동등하다(self):
+        """Given: 동일 인수로 생성한 두 TrimRange
+        When:  == 비교
+        Then:  True 반환 (frozen dataclass 기본 __eq__).
+
+        WHY: VideoExportConfig 비교·테스트 단언에서 동등성이 필요하다.
+        """
+        _require_trim()
+        a = TrimRange(start=TRIM_START_2, end=TRIM_END_8)
+        b = TrimRange(start=TRIM_START_2, end=TRIM_END_8)
+
+        assert a == b
+
+
+# ===========================================================================
+# 11. slice_for_trim — 트림 슬라이스 항등/슬라이스 (RED)
+# ===========================================================================
+class TestSliceForTrim:
+    """slice_for_trim(items, trim) → trim 구간으로 잘라낸 리스트.
+
+    trim=None이면 항등(items 그대로), 아니면 items[trim.start:trim.end].
+    """
+
+    def test_trim_None이면_items를_그대로_반환한다(self):
+        """Given: 길이 10 리스트, trim=None
+        When:  slice_for_trim 호출
+        Then:  반환 리스트가 원본과 값이 동일하다(항등 경로).
+
+        WHY: trim=None은 "트림 안 함" 무회귀 경로. 기존 동작 보존 핵심 조건.
+        """
+        _require_trim()
+        items = list(range(LIST_LEN_10))
+
+        result = slice_for_trim(items, None)
+
+        assert list(result) == items
+
+    def test_trim_2_5이면_인덱스_2부터_4까지_3개를_반환한다(self):
+        """Given: 길이 10 리스트, trim=TrimRange(2, 5)
+        When:  slice_for_trim 호출
+        Then:  [2, 3, 4] (3개, end=5 미포함).
+
+        WHY: [start, end) 배타 끝 규칙 정확성 검증. off-by-one 방어.
+        """
+        _require_trim()
+        items = list(range(LIST_LEN_10))
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_5)
+
+        result = slice_for_trim(items, trim)
+
+        assert list(result) == [2, 3, 4]
+        assert len(result) == TRIM_LEN_3
+
+    def test_슬라이스_결과는_원본과_동일_객체가_아니다(self):
+        """Given: 길이 10 리스트, trim=TrimRange(2, 5)
+        When:  slice_for_trim 호출
+        Then:  반환 객체가 원본 리스트와 동일 참조(is)가 아니다.
+
+        WHY: 슬라이싱은 새 리스트를 만든다. 원본 mutate 방지(부수효과 없음 계약).
+        """
+        _require_trim()
+        items = list(range(LIST_LEN_10))
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_5)
+
+        result = slice_for_trim(items, trim)
+
+        assert result is not items
+
+
+# ===========================================================================
+# 12. shift_segments_into_trim — 트림-로컬 평행이동/클리핑 (RED)
+# ===========================================================================
+class TestShiftSegmentsIntoTrim:
+    """shift_segments_into_trim(segments, trim) → 트림-로컬 [0, M) 구간 튜플.
+
+    각 seg를 [trim.start, trim.end)와 교집합 후 trim.start만큼 빼서 평행이동.
+    lo=max(seg.start, trim.start)-trim.start, hi=min(seg.end, trim.end)-trim.start.
+    lo < hi일 때만 채택, 트림 밖 구간은 드롭. factor는 보존.
+    """
+
+    def test_trim_None이면_segments를_그대로_반환한다(self):
+        """Given: segments=(SpeedSegment(3,7,0.5),), trim=None
+        When:  shift_segments_into_trim 호출
+        Then:  입력과 동일한 segments(항등 경로).
+
+        WHY: trim=None은 "트림 안 함" 무회귀 경로. 평행이동 없이 그대로 통과.
+        """
+        _require_trim()
+        segs = (SpeedSegment(start=3, end=7, factor=FACTOR_HALF),)
+
+        result = shift_segments_into_trim(segs, None)
+
+        assert tuple(result) == segs
+
+    def test_트림_내부_구간이_trim_start만큼_평행이동된다(self):
+        """Given: seg(3,7,0.5), trim=TrimRange(2,8)
+        When:  shift_segments_into_trim 호출
+        Then:  seg(1,5,0.5) — lo=3-2=1, hi=7-2=5.
+
+        WHY: 트림-로컬 [0,M) 좌표로 평행이동. 트림 먼저 → segments 트림-로컬 적용
+             (planner 적용 순서). 트림 시작점이 새 원점(0)이 된다.
+        """
+        _require_trim()
+        segs = (SpeedSegment(start=3, end=7, factor=FACTOR_HALF),)
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_8)
+
+        result = shift_segments_into_trim(segs, trim)
+
+        assert tuple(result) == (
+            SpeedSegment(start=1, end=5, factor=FACTOR_HALF),
+        )
+
+    def test_트림_경계에_걸친_구간은_교집합으로_클리핑된다(self):
+        """Given: seg(0,4,2.0), trim=TrimRange(2,8)
+        When:  shift_segments_into_trim 호출
+        Then:  seg(0,2,2.0) — lo=max(0,2)-2=0, hi=min(4,8)-2=2.
+
+        WHY: 트림 시작 이전(0~2) 부분은 잘려나가고, 트림 내부(2~4)만 남아
+             트림-로컬 [0,2)로 평행이동. 경계 클리핑 정확성 검증.
+        """
+        _require_trim()
+        segs = (SpeedSegment(start=0, end=4, factor=FACTOR_DOUBLE),)
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_8)
+
+        result = shift_segments_into_trim(segs, trim)
+
+        assert tuple(result) == (
+            SpeedSegment(start=0, end=2, factor=FACTOR_DOUBLE),
+        )
+
+    def test_트림_완전_밖_구간은_드롭되어_빈_결과가_된다(self):
+        """Given: seg(9,10,0.5), trim=TrimRange(2,8)
+        When:  shift_segments_into_trim 호출
+        Then:  빈 튜플 — lo=max(9,2)-2=7, hi=min(10,8)-2=6, lo>=hi → 드롭.
+
+        WHY: 트림 범위 [2,8) 밖의 구간은 교집합이 비어 채택되지 않는다.
+             lo < hi 조건이 트림 밖 구간을 정확히 걸러낸다.
+        """
+        _require_trim()
+        segs = (SpeedSegment(start=9, end=10, factor=FACTOR_HALF),)
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_8)
+
+        result = shift_segments_into_trim(segs, trim)
+
+        assert tuple(result) == ()
+
+    def test_평행이동_후_factor가_보존된다(self):
+        """Given: seg(3,7,0.25), trim=TrimRange(2,8)
+        When:  shift_segments_into_trim 호출
+        Then:  결과 구간의 factor == 0.25 (보존).
+
+        WHY: 트림은 구간 위치만 바꾼다. 배속(factor)은 트림과 직교하므로 불변.
+        """
+        _require_trim()
+        segs = (SpeedSegment(start=3, end=7, factor=FACTOR_QUARTER),)
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_8)
+
+        result = shift_segments_into_trim(segs, trim)
+
+        assert len(result) == 1
+        assert result[0].factor == pytest.approx(FACTOR_QUARTER)
+
+
+# ===========================================================================
+# 13. validate_trim — 트림 범위 검증 (RED)
+# ===========================================================================
+class TestValidateTrim:
+    """validate_trim(trim, n_frames) → None 또는 ValueError.
+
+    trim=None이면 통과. 0 <= start < end <= n_frames 아니면 ValueError(한국어).
+    """
+
+    def test_정상_범위는_통과한다_예외없음(self):
+        """Given: trim=TrimRange(2,5), n_frames=10
+        When:  validate_trim 호출
+        Then:  예외 없이 통과(반환값 None).
+
+        WHY: 0 <= 2 < 5 <= 10 정상 범위. 정상 경로에서 부수효과 없음 보장.
+        """
+        _require_trim()
+        trim = TrimRange(start=TRIM_START_2, end=TRIM_END_5)
+
+        assert validate_trim(trim, LIST_LEN_10) is None
+
+    def test_trim_None이면_통과한다(self):
+        """Given: trim=None, n_frames=10
+        When:  validate_trim 호출
+        Then:  예외 없이 통과.
+
+        WHY: trim=None은 "트림 안 함"이므로 검증 대상이 아니다(항등 경로).
+        """
+        _require_trim()
+        assert validate_trim(None, LIST_LEN_10) is None
+
+    def test_start가_end_이상이면_ValueError를_던진다(self):
+        """Given: trim=TrimRange(5,5), n_frames=10 (start >= end)
+        When:  validate_trim 호출
+        Then:  ValueError 발생.
+
+        WHY: 빈/역전 구간 금지. start < end가 필수 조건.
+        """
+        _require_trim()
+        trim = TrimRange(start=5, end=5)
+
+        with pytest.raises(ValueError):
+            validate_trim(trim, LIST_LEN_10)
+
+    def test_end가_n_frames_초과면_ValueError를_던진다(self):
+        """Given: trim=TrimRange(2, 12), n_frames=10 (end > n_frames)
+        When:  validate_trim 호출
+        Then:  ValueError 발생.
+
+        WHY: 프레임 범위 밖 인덱스는 슬라이스 오류를 유발한다(end <= n_frames 필수).
+        """
+        _require_trim()
+        trim = TrimRange(start=TRIM_START_2, end=LIST_LEN_10 + 2)
+
+        with pytest.raises(ValueError):
+            validate_trim(trim, LIST_LEN_10)
+
+    def test_start가_음수이면_ValueError를_던진다(self):
+        """Given: trim=TrimRange(-1, 5), n_frames=10 (start < 0)
+        When:  validate_trim 호출
+        Then:  ValueError 발생.
+
+        WHY: 음수 시작 인덱스는 파이썬 슬라이스에서 뒤에서부터 계산되어
+             의도와 다른 결과를 낸다. 0 <= start 필수.
+        """
+        _require_trim()
+        trim = TrimRange(start=-1, end=TRIM_END_5)
+
+        with pytest.raises(ValueError):
+            validate_trim(trim, LIST_LEN_10)
+
+    def test_범위_오류_메시지가_한국어이고_범위_수치를_포함한다(self):
+        """Given: trim=TrimRange(2, 12), n_frames=10 (end 초과)
+        When:  validate_trim 호출
+        Then:  ValueError 메시지에 한국어 + 범위 수치(n_frames=10 등) 포함.
+
+        WHY: 사용자 대면 에러는 한국어 정책(글로벌 CLAUDE.md).
+             범위 수치를 포함해 어디가 잘못됐는지 알려야 한다(planner 요구).
+        """
+        _require_trim()
+        n = LIST_LEN_10
+        trim = TrimRange(start=TRIM_START_2, end=n + 2)
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_trim(trim, n)
+
+        msg = str(exc_info.value)
+        has_korean = any(ord(c) >= 0xAC00 for c in msg)
+        assert has_korean, f"에러 메시지에 한국어 없음: {msg!r}"
+        assert str(n) in msg, f"에러 메시지에 범위 수치({n}) 없음: {msg!r}"

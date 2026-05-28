@@ -64,6 +64,21 @@ _MSG_STORY2_NOT_IMPL = (
 
 _MSG_NOT_IMPL = "easy_capture.core.export.video_export 미구현 — RED 예상"
 
+# --- 트림 슬라이스 — TrimRange 신규 심볼 격리 (TDD RED) ---
+# WHY: TrimRange는 timeremap에 추가될 신규 심볼이라 구현 전 ImportError로 실패한다.
+#      _HAS_TRIM 플래그로 트림/루프 테스트만 정확히 skip 처리한다.
+try:
+    from easy_capture.core.timing.timeremap import TrimRange
+    _HAS_TRIM = True
+except ImportError:
+    TrimRange = None  # type: ignore[assignment,misc]
+    _HAS_TRIM = False
+
+_MSG_TRIM_NOT_IMPL = (
+    "트림+루프 미구현 — VideoExportConfig.trim/loop_count 또는 "
+    "timeremap.TrimRange 미지원 (RED 예상)"
+)
+
 # ---------------------------------------------------------------------------
 # 테스트 상수
 # ---------------------------------------------------------------------------
@@ -1070,3 +1085,357 @@ class TestMp4FrameReplication:
         assert (tmp_path / "mp4_regression.mp4").stat().st_size > 0, (
             "무회귀 MP4 파일 크기 = 0"
         )
+
+
+# ---------------------------------------------------------------------------
+# Story 4 — 트림 + 루프 통합 (TDD RED)
+# ---------------------------------------------------------------------------
+# Story 4 테스트 상수 — 매직넘버 금지
+# 좌표계: trim·segments 모두 span 상대 [0, n) 단일 (planner 설계 확정안).
+# 적용 순서: 트림 먼저 → segments 트림-로컬 평행이동/클리핑 → 스케줄 빌드.
+_S4_N_FRAMES = 6                 # 합성 크롭 총 프레임 수
+_S4_FPS = 12.0                   # 출력 fps
+_S4_TRIM_START = 2               # 트림 시작 인덱스 (포함)
+_S4_TRIM_END = 5                 # 트림 끝 인덱스 (미포함) → 길이 3 (프레임 2,3,4)
+_S4_TRIM_LEN = 3                 # 트림 길이 (M = end - start)
+_S4_FRAME_COUNT_TOLERANCE = 1    # MP4 Bresenham ±1 허용 오차
+
+# 트림+슬로우 결합 상수
+_S4_COMBO_TRIM_START = 0         # 트림 시작 (전체 앞부분)
+_S4_COMBO_TRIM_END = 4           # 트림 끝 (미포함) → 길이 4 (프레임 0,1,2,3)
+_S4_COMBO_TRIM_LEN = 4
+_S4_COMBO_SEG_START = 0          # 트림-로컬 슬로우 구간 시작
+_S4_COMBO_SEG_END = 2            # 트림-로컬 슬로우 구간 끝 (미포함) → 로컬 0,1
+_S4_COMBO_SLOW_FACTOR = 0.5      # 슬로우 → 구간 2프레임 ×2 ≈ 4프레임
+
+# 루프 상수
+_S4_LOOP_COUNT_3 = 3             # 유한 루프 3회
+_S4_LOOP_COUNT_INFINITE = 0      # 무한 루프 (GIF loop=0)
+
+
+def _read_gif_loop(gif_path: str) -> int:
+    """PIL로 GIF의 loop 메타값을 읽어 반환한다(0=무한).
+
+    WHY PIL info['loop']:
+      GIF89a NETSCAPE2.0 확장 블록의 루프 카운트를 PIL이 info['loop']로 노출한다.
+      loop=0은 무한 반복, loop=N은 N회 반복(표준 GIF 스펙).
+      imageio get_reader meta_data의 'loop'보다 PIL info가 더 일관되게 노출된다.
+    """
+    from PIL import Image
+
+    with Image.open(gif_path) as img:
+        return img.info.get("loop", 0)
+
+
+def _make_s4_crops(n: int = _S4_N_FRAMES) -> list[np.ndarray]:
+    """Story 4용 n개 합성 크롭(32×24 RGB)을 반환한다."""
+    return _make_synth_frames(n=n, h=CROP_BOX_H, w=CROP_BOX_W)
+
+
+# Story 4 guard: video_export + TrimRange(timeremap) 모두 존재해야 실행
+_STORY4_SKIP = not (_HAS_VIDEO_EXPORT and _HAS_TRIM)
+
+
+class TestVideoExportConfigTrimLoop:
+    """Story 4: VideoExportConfig.trim/loop_count 필드 계약 검증.
+
+    신규 필드:
+      - trim: TrimRange | None = None
+      - loop_count: int = 0
+    기존 필드(fmt/fps/gap_policy/segments) 순서·기본값 불변(무회귀).
+    """
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_trim_기본값이_None이다(self):
+        """Given: 인자 없이 VideoExportConfig 생성
+        When:  trim 필드 접근
+        Then:  trim is None (기본값 = 트림 안 함).
+
+        WHY: trim=None은 "트림 안 함" 무회귀 경로. 기본 동작 보존 핵심 조건.
+        """
+        config = VideoExportConfig()
+
+        assert hasattr(config, "trim"), (
+            "VideoExportConfig에 trim 필드가 없음 — Story 4 미구현"
+        )
+        assert config.trim is None, (
+            f"trim 기본값 불일치: {config.trim!r} vs None"
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_loop_count_기본값이_0이다(self):
+        """Given: 인자 없이 VideoExportConfig 생성
+        When:  loop_count 필드 접근
+        Then:  loop_count == 0 (기본값 = GIF 무한 루프).
+
+        WHY: loop_count=0은 GIF 무한 반복(기존 _encode_gif loop=0 계약).
+             기본값이 0이어야 기존 무회귀 동작과 동일하다.
+        """
+        config = VideoExportConfig()
+
+        assert hasattr(config, "loop_count"), (
+            "VideoExportConfig에 loop_count 필드가 없음 — Story 4 미구현"
+        )
+        assert config.loop_count == 0, (
+            f"loop_count 기본값 불일치: {config.loop_count!r} vs 0"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_EXPORT, reason=_MSG_NOT_IMPL)
+    def test_기존_필드_기본값이_불변이다_무회귀(self):
+        """Given: 인자 없이 VideoExportConfig 생성
+        When:  기존 필드(fmt/fps/gap_policy/segments) 접근
+        Then:  fmt='gif', fps=12.0, gap_policy=BACKGROUND, segments=() 불변.
+
+        WHY (무회귀): trim/loop_count 추가가 기존 필드 순서·기본값을 바꾸면
+             기존 300+ 테스트와 호출부가 깨진다. 신규 필드는 끝에 추가되어야 한다.
+        """
+        config = VideoExportConfig()
+
+        assert config.fmt == "gif"
+        assert config.fps == 12.0
+        assert config.gap_policy == GapPolicy.BACKGROUND
+        assert config.segments == ()
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_trim_loop_지정값이_보관된다(self):
+        """Given: trim=TrimRange(2,5), loop_count=3
+        When:  VideoExportConfig 생성
+        Then:  필드값 그대로 반환.
+        """
+        trim = TrimRange(_S4_TRIM_START, _S4_TRIM_END)
+        config = VideoExportConfig(trim=trim, loop_count=_S4_LOOP_COUNT_3)
+
+        assert config.trim == trim
+        assert config.loop_count == _S4_LOOP_COUNT_3
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_trim_loop_필드가_frozen_불변이다(self):
+        """Given: trim/loop_count 지정 VideoExportConfig
+        When:  loop_count 필드 수정 시도
+        Then:  FrozenInstanceError(AttributeError/TypeError) 발생.
+
+        WHY: VideoExportConfig는 frozen=True이므로 신규 필드도 불변이어야 한다.
+        """
+        config = VideoExportConfig(loop_count=_S4_LOOP_COUNT_3)
+
+        with pytest.raises((AttributeError, TypeError)):
+            config.loop_count = 0  # type: ignore[misc]
+
+
+class TestTrimGifMp4FrameCount:
+    """Story 4: 트림 지정 시 출력 프레임 수가 트림 길이 기반인지 검증.
+
+    trim=TrimRange(2,5) + segments=() → 출력 프레임 3개(트림 길이).
+    """
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_무회귀_trim_None_loop_0이면_기존_프레임_수가_유지된다(self, tmp_path):
+        """Given: 6개 크롭, trim=None, loop_count=0, segments=()
+        When:  encode_frames(fmt='gif') 후 GIF 재로드
+        Then:  출력 프레임 수 == 6 (기존 균일 경로와 동일).
+
+        WHY (무회귀): trim=None and loop_count=0이면 기존 동작과 완전히 동일해야 한다.
+             기존 GIF 라운드트립 테스트(6프레임)가 깨지지 않음을 명시적으로 가드한다.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S4_FPS, trim=None, loop_count=0
+        )
+        output_path = str(tmp_path / "trim_none_regression.gif")
+
+        encode_frames(crops, output_path, config)
+
+        reloaded = imageio.mimread(output_path)
+        assert len(reloaded) == _S4_N_FRAMES, (
+            f"trim=None 무회귀 프레임 수 불일치: {len(reloaded)} vs {_S4_N_FRAMES}. "
+            "trim=None and loop_count=0은 기존 경로와 동일해야 함."
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_트림_GIF_출력_프레임_수가_트림_길이와_같다(self, tmp_path):
+        """Given: 6개 크롭, trim=TrimRange(2,5), segments=()
+        When:  encode_frames(fmt='gif') 후 GIF 재로드
+        Then:  출력 프레임 수 == 3 (트림 길이, 프레임 2,3,4만).
+
+        WHY: 트림은 crops를 [trim.start, trim.end)로 슬라이스한다.
+             segments=()이므로 복제/드롭 없이 트림 길이 그대로 출력된다.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        trim = TrimRange(_S4_TRIM_START, _S4_TRIM_END)
+        config = VideoExportConfig(fmt="gif", fps=_S4_FPS, trim=trim)
+        output_path = str(tmp_path / "trim.gif")
+
+        encode_frames(crops, output_path, config)
+
+        reloaded = imageio.mimread(output_path)
+        assert len(reloaded) == _S4_TRIM_LEN, (
+            f"트림 GIF 프레임 수 불일치: {len(reloaded)} vs {_S4_TRIM_LEN}. "
+            f"trim=({_S4_TRIM_START},{_S4_TRIM_END}) 슬라이스 미적용 의심."
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_트림_MP4_라운드트립_프레임_수가_트림_길이와_같다(self, tmp_path):
+        """Given: 6개 크롭, trim=TrimRange(2,5), segments=(), fmt='mp4'
+        When:  encode_frames 후 MP4 재로드
+        Then:  총 프레임 수 == 3 (트림 길이).
+
+        WHY: MP4 경로도 트림 슬라이스가 동일하게 적용되어야 한다.
+             segments=()이므로 복제/드롭 없이 트림 길이 그대로다.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        trim = TrimRange(_S4_TRIM_START, _S4_TRIM_END)
+        config = VideoExportConfig(fmt="mp4", fps=_S4_FPS, trim=trim)
+        output_path = str(tmp_path / "trim.mp4")
+
+        encode_frames(crops, output_path, config)
+
+        actual_count = _count_mp4_frames(output_path)
+        assert actual_count == _S4_TRIM_LEN, (
+            f"트림 MP4 프레임 수 불일치: {actual_count} vs {_S4_TRIM_LEN}. "
+            f"trim=({_S4_TRIM_START},{_S4_TRIM_END}) 슬라이스 미적용 의심."
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    @pytest.mark.skipif(_NO_FFMPEG, reason=_MSG_NO_FFMPEG)
+    def test_트림_후_트림로컬_슬로우_segments가_MP4_복제로_반영된다(self, tmp_path):
+        """Given: 6개 크롭, trim=TrimRange(0,4), segments=(SpeedSegment(0,2,0.5),), mp4
+        When:  encode_frames 후 MP4 재로드
+        Then:  총 프레임 수 ≈ 6 (±1): 트림 길이 4 → 슬로우 구간 [0,2) 2프레임 ×2=4,
+               구간 밖 [2,4) 2프레임 = 2 → 4+2 = 6.
+
+        WHY: 적용 순서 검증 — 트림 먼저(길이 4) → 트림-로컬 segments(0,2,0.5) 적용.
+             segments가 트림-로컬 좌표 [0, M)로 해석되어 트림된 프레임에 복제 반영.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        trim = TrimRange(_S4_COMBO_TRIM_START, _S4_COMBO_TRIM_END)
+        seg = SpeedSegment(
+            _S4_COMBO_SEG_START, _S4_COMBO_SEG_END, _S4_COMBO_SLOW_FACTOR
+        )
+        config = VideoExportConfig(
+            fmt="mp4", fps=_S4_FPS, trim=trim, segments=(seg,)
+        )
+        output_path = str(tmp_path / "trim_slow.mp4")
+
+        # 기대 프레임 수 계산 (매직넘버 금지 — 상수 조합)
+        _n_slow = round(
+            (_S4_COMBO_SEG_END - _S4_COMBO_SEG_START) / _S4_COMBO_SLOW_FACTOR
+        )  # 2/0.5 = 4
+        _n_outside = _S4_COMBO_TRIM_LEN - (_S4_COMBO_SEG_END - _S4_COMBO_SEG_START)
+        _expected_total = _n_slow + _n_outside  # 4 + 2 = 6
+
+        encode_frames(crops, output_path, config)
+
+        actual_count = _count_mp4_frames(output_path)
+        assert abs(actual_count - _expected_total) <= _S4_FRAME_COUNT_TOLERANCE, (
+            f"트림+슬로우 MP4 프레임 수 불일치: {actual_count} vs 기대 "
+            f"{_expected_total} (±{_S4_FRAME_COUNT_TOLERANCE}). "
+            "트림 후 트림-로컬 segments 복제 미적용 의심."
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_트림_범위_오류_시_encode_frames가_ValueError를_던진다(self, tmp_path):
+        """Given: 6개 크롭, trim=TrimRange(2,2) (start==end, 빈 구간)
+        When:  encode_frames(fmt='gif') 호출
+        Then:  ValueError 발생 (validate_trim 전파).
+
+        WHY: encode_frames가 트림 적용 전 validate_trim을 호출하고,
+             빈/범위초과 트림의 ValueError를 흡수하지 않고 그대로 전파해야 한다.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        bad_trim = TrimRange(_S4_TRIM_START, _S4_TRIM_START)  # (2, 2) 빈 구간
+        config = VideoExportConfig(fmt="gif", fps=_S4_FPS, trim=bad_trim)
+        output_path = str(tmp_path / "bad_trim.gif")
+
+        with pytest.raises(ValueError):
+            encode_frames(crops, output_path, config)
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_트림_범위_초과_시_encode_frames가_ValueError를_던진다(self, tmp_path):
+        """Given: 6개 크롭, trim=TrimRange(2, 100) (end > n_frames)
+        When:  encode_frames(fmt='gif') 호출
+        Then:  ValueError 발생 (validate_trim 전파).
+
+        WHY: 트림 end가 선택된 프레임 수를 초과하면 슬라이스가 잘못된 결과를 낸다.
+             validate_trim이 n_frames 기준으로 검증해 ValueError를 전파해야 한다.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        over_trim = TrimRange(_S4_TRIM_START, _S4_N_FRAMES + 100)
+        config = VideoExportConfig(fmt="gif", fps=_S4_FPS, trim=over_trim)
+        output_path = str(tmp_path / "over_trim.gif")
+
+        with pytest.raises(ValueError):
+            encode_frames(crops, output_path, config)
+
+
+class TestGifLoopCount:
+    """Story 4: GIF loop_count가 메타데이터로 라운드트립되는지 검증.
+
+    loop_count=N → GIF loop=N, loop_count=0 → loop=0(무한).
+    MP4는 loop_count 무시.
+    """
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_loop_count_3이면_GIF_메타_loop가_3이다(self, tmp_path):
+        """Given: 6개 크롭, loop_count=3, fmt='gif'
+        When:  encode_frames 후 PIL로 loop 메타 읽기
+        Then:  loop == 3 (유한 3회 반복).
+
+        WHY: loop_count가 GIF NETSCAPE2.0 루프 카운트로 전달되어야 한다.
+             encode_frames → _encode_gif loop= 인자에 config.loop_count 반영.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S4_FPS, loop_count=_S4_LOOP_COUNT_3
+        )
+        output_path = str(tmp_path / "loop3.gif")
+
+        encode_frames(crops, output_path, config)
+
+        loop_value = _read_gif_loop(output_path)
+        assert loop_value == _S4_LOOP_COUNT_3, (
+            f"GIF loop 메타 불일치: {loop_value} vs {_S4_LOOP_COUNT_3}. "
+            "loop_count가 GIF loop= 인자로 전달되지 않음."
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_loop_count_0이면_GIF_메타_loop가_0_무한이다(self, tmp_path):
+        """Given: 6개 크롭, loop_count=0(기본), fmt='gif'
+        When:  encode_frames 후 PIL로 loop 메타 읽기
+        Then:  loop == 0 (무한 반복).
+
+        WHY: loop_count=0은 기존 무한 루프 계약과 동일해야 한다(무회귀).
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S4_FPS, loop_count=_S4_LOOP_COUNT_INFINITE
+        )
+        output_path = str(tmp_path / "loop_infinite.gif")
+
+        encode_frames(crops, output_path, config)
+
+        loop_value = _read_gif_loop(output_path)
+        assert loop_value == _S4_LOOP_COUNT_INFINITE, (
+            f"GIF loop 메타 불일치: {loop_value} vs 0(무한). "
+            "loop_count=0은 무한 루프여야 함."
+        )
+
+    @pytest.mark.skipif(_STORY4_SKIP, reason=_MSG_TRIM_NOT_IMPL)
+    def test_loop_count_음수이면_ValueError가_발생한다(self, tmp_path):
+        """Given: 6개 크롭, loop_count=-1 (무효값)
+        When:  encode_frames 호출
+        Then:  ValueError 발생 — 한국어 메시지에 음수 값 포함.
+
+        WHY: loop_count=-1은 GIF 스펙에 존재하지 않는 무효값이다.
+             validate_trim과 대칭으로 인코딩 진입 전 조기 차단해
+             imageio에 음수가 전달되어 undefined behavior가 발생하는 것을 막는다.
+             reviewer [중요 2] 가드 요건.
+        """
+        crops = _make_s4_crops(_S4_N_FRAMES)
+        config = VideoExportConfig(
+            fmt="gif", fps=_S4_FPS, loop_count=-1
+        )
+        output_path = str(tmp_path / "bad_loop.gif")
+
+        with pytest.raises(ValueError, match="반복|loop_count|-1"):
+            encode_frames(crops, output_path, config)

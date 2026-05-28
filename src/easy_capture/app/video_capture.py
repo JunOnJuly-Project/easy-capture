@@ -227,7 +227,17 @@ class VideoCaptureUseCase:
         target: tuple[str, VideoExportConfig],
         result: TrackResult | None = None,
     ) -> None:
-        """gap_policy → 프레임 선택 → crop_frames → encode_frames."""
+        """gap_policy → 프레임 선택 → crop_frames → encode_frames.
+
+        WHY 좌표계 한정(BACKGROUND 전제):
+          build_output_indices가 crops를 만들고 나서 config.trim·segments가 그 crops
+          시퀀스 위에서 동작한다. gap_policy=BACKGROUND이면 crops == span 전체이므로
+          trim/segments의 span 상대 좌표가 그대로 성립한다. CUT/FREEZE에서는
+          build_output_indices가 갭 프레임을 제거해 crops가 압축되므로 사용자가 지정한
+          span 상대 trim/segments 좌표가 실제 crops 좌표와 어긋난다.
+          현재는 BACKGROUND 전제로만 정합을 보장한다(잠복 — ADR 0013의 2단계 인덱싱
+          미구현 추적).
+        """
         path, config = target
         valid_flags = _valid_flags_from_result(result, len(frames))
         indices = build_output_indices(valid_flags, config.gap_policy)
