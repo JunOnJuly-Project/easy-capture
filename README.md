@@ -4,7 +4,7 @@
 
 클릭 한 번으로 추적 대상을 지정하면, SAM2 기반 추적으로 그 사람/사물을 따라가며 원하는 범위를 잘라 캡처·GIF·MP4 로 내보낸다.
 
-> **현재 상태: 기획 단계.** 코드는 아직 없으며, 본 저장소에는 기획 문서 세트가 있다. 구현은 PoC → MVP 순으로 진행한다.
+> **현재 상태: 구현 중 — 이미지(짤) 모드 MVP 완료.** 이미지 파일/영상에서 클릭 한 번으로 피사체를 검출하고 PNG/JPG로 저장하는 기능이 동작한다. GIF/MP4 비디오 모드는 개발 중.
 
 ---
 
@@ -18,6 +18,23 @@
 - **크롭**: centroid 중심 + 떨림 완화 + 종횡비 잠금(1:1/9:16/16:9)
 - **출력**: PNG/JPG · GIF(팔레트·크기예측) · MP4(오디오 포함)
 - **업스케일(옵션)**: Real-ESRGAN / SwinIR
+
+---
+
+## 아키텍처 (레이어 구조)
+
+```
+ui  ──▶  app  ──▶  core  (Protocol/도메인 로직, 외부 라이브러리 비의존)
+                    ▲
+         infra  ────┘  (PyAV·SAM2·Pillow 구현체 주입)
+```
+
+- **core**: 크롭 기하·마스크 처리·내보내기 순수 로직. `torch`/`PySide6`/`av` 비의존.
+- **infra**: `Sam2ImageBackend`(transformers), `video_io`(PyAV·Pillow) — Protocol 구현체.
+- **app**: `ImageCaptureUseCase` — 파일→프레임→클릭→마스크→크롭→저장 오케스트레이션. `AppRouter` 조립 루트.
+- **ui**: PySide6 위젯(`FrameCanvas`, `ImageMainWindow`). 도메인 로직은 앱 레이어에 위임.
+
+상세: [docs/architecture.md](docs/architecture.md) · [docs/adr/0008-app-usecase-layer.md](docs/adr/0008-app-usecase-layer.md)
 
 ---
 
@@ -39,28 +56,42 @@
 
 ---
 
-## 기술 스택 (계획)
+## 기술 스택
 
-Python 3.10+ · PySide6 · SAM 2.1 · Grounding DINO · PySceneDetect · PyAV/ffprobe · Real-ESRGAN/SwinIR · imageio/Pillow
+| 레이어 | 라이브러리 |
+|---|---|
+| UI | Python 3.10+ · PySide6 |
+| 세그멘테이션 | SAM 2.1 (transformers 5.9.0, `facebook/sam2.1-hiera-tiny`) |
+| 영상 디코드 | PyAV · Pillow |
+| 자동 검출 (비디오 모드, 미구현) | Grounding DINO · PySceneDetect |
+| 업스케일 (예정) | SwinIR (기본) · Real-ESRGAN (옵션) |
 
-상세·라이선스는 [docs/resources.md](docs/resources.md).
+상세·라이선스는 [docs/resources.md](docs/resources.md). 스택 결정 배경은 `docs/adr/` 참조.
 
 ---
 
-## 설치 / 실행 (예정)
-
-> 구현 단계에서 확정. 현재는 계획만 존재.
+## 설치 / 실행
 
 ```bash
 git clone <repo-url>
 cd easy-capture
 cp .env.example .env
-# (예정) python -m venv .venv && pip install -r requirements.txt
-# (예정) python -m easy_capture
+python -m venv .venv
+.venv\Scripts\pip install -e ".[dev]"   # Windows
+# source .venv/bin/activate && pip install -e ".[dev]"   # macOS/Linux
+python -m easy_capture
 ```
 
-- GPU(NVIDIA CUDA) 권장(6GB+). CPU 도 동작하나 느림.
-- 최초 실행 시 AI 모델(약 1.5~2GB) 자동 다운로드.
+### 이미지(짤) 모드 사용법
+1. 시작 화면에서 **이미지** 선택
+2. 이미지 파일 또는 영상 파일 열기 (영상은 첫 프레임을 추출)
+3. 캔버스에서 원하는 피사체를 **클릭**
+4. SAM2가 피사체를 자동 검출하고 크롭 박스를 생성 (첫 클릭은 모델 다운로드 포함, 약 1~3초)
+5. **저장** 버튼으로 PNG 또는 JPG 내보내기
+
+> 첫 클릭 시 SAM2 모델(facebook/sam2.1-hiera-tiny, 수백 MB)이 자동 다운로드된다.  
+> CPU 전용 환경에서도 동작하나, SAM2 추론에 1~3초 소요된다. 워커 스레드로 실행되므로 UI는 멈추지 않는다.  
+> GPU(NVIDIA CUDA 6GB+) 환경에서는 추론 속도가 크게 향상된다.
 
 ---
 
