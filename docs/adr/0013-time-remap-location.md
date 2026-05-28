@@ -43,14 +43,19 @@ class PlaybackSchedule:
     frame_indices: 출력할 (타임리맵 입력 기준) 프레임 인덱스 시퀀스.
                    슬로우=복제로 같은 인덱스 반복, 패스트=일부 인덱스 생략.
     durations_ms:  frame_indices와 1:1 대응하는 프레임별 표시시간(ms).
+    base_fps:      기준 fps. schedule_to_cfr_indices가 PlaybackSchedule만으로
+                   복제/드롭 비율을 결정하기 위해 추가(인터페이스 최소화).
     """
-    frame_indices: list[int]
-    durations_ms: list[float]
+    frame_indices: tuple[int, ...]
+    durations_ms: tuple[float, ...]
+    base_fps: float = 30.0
 ```
 
-- **GIF 경로**: `durations_ms`를 per-frame duration 리스트로 직접 전달한다. 프레임 복제 없이 표시시간만 늘리면 되므로 GIF의 VFR 특성을 자연스럽게 활용한다.
-- **MP4 경로**: 고정 fps라 표시시간을 직접 표현할 수 없으므로, `schedule_to_cfr_indices(schedule)` 헬퍼로 슬로우 구간은 같은 인덱스를 정수배 복제하고 패스트 구간은 등간격 드롭해 CFR 시간축 인덱스 시퀀스를 만든다.
-- **항등 보장**: `segments == []`이면 `frame_indices = list(range(n_frames))`, `durations_ms = [1000/base_fps] * n_frames`로 기존 단일 fps 경로와 동일한 결과를 낸다.
+> **결정2 보강 (구현 단계 반영):** 초안의 `list[int]`·`list[float]` 필드를 `tuple[int,...]`·`tuple[float,...]`로 변경했다. `frozen=True` dataclass에 mutable list를 두면 해시 불가이고 외부에서 내부 컬렉션을 변경할 수 있어 불변 IR 표방과 모순이 생긴다. `VideoExportConfig.segments`를 `tuple`로 정의한 것과 동일한 논리로 tuple로 통일한다. `base_fps` 필드도 추가해 `schedule_to_cfr_indices`가 PlaybackSchedule만으로 복제/드롭 비율을 결정할 수 있게 했다(슬로우 전용 스케줄에서 min(durations) 기준이면 ratio=1.0이 되어 복제 불가인 문제를 해소).
+
+- **GIF 경로**: `durations_ms`를 per-frame duration tuple로 직접 전달한다. 프레임 복제 없이 표시시간만 늘리면 되므로 GIF의 VFR 특성을 자연스럽게 활용한다.
+- **MP4 경로**: 고정 fps라 표시시간을 직접 표현할 수 없으므로, `schedule_to_cfr_indices(schedule)` 헬퍼로 슬로우 구간은 같은 인덱스를 정수배 복제하고 패스트 구간은 등간격 드롭해 CFR 시간축 인덱스 시퀀스를 만든다. Bresenham 누적기 방식으로 ±1 오차 내 정확한 길이를 보장하며, 누적기 잔여가 남을 때 마지막 프레임을 보장해 패스트 구간 소실을 방지한다.
+- **항등 보장**: `segments == []`이면 `frame_indices = tuple(range(n_frames))`, `durations_ms = (1000/base_fps,) * n_frames`로 기존 단일 fps 경로와 동일한 결과를 낸다.
 
 핵심 함수 시그니처:
 
