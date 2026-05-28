@@ -9,8 +9,9 @@
   3. export()           → tmp_path에 파일 생성, 크롭 크기 일치
   4. end-to-end happy path → 전 구간을 가짜 의존으로 관통
   5. Protocol 계약      → isinstance(FakeBackend(), SegmentationBackend) 통과
-
-NOTE: 구현 없으므로 import 실패로 Red 상태. TDD 정상.
+  6. segment()          → SegmentResult(mask, centroid) 반환 / 빈 마스크 EmptyMaskError
+  7. compute_box()      → 순수 계산: 종횡비·크기 변경 시 박스 재계산, 재세그 없음(핵심 회귀 가드)
+  8. make_crop_box 무회귀 → segment+compute_box 위임 후에도 동일 결과(A안)
 """
 from __future__ import annotations
 
@@ -18,7 +19,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from easy_capture.app.image_capture import CropRequest, EmptyMaskError, ImageCaptureUseCase
+from easy_capture.app.image_capture import (
+    BoxParams,
+    CropRequest,
+    EmptyMaskError,
+    ImageCaptureUseCase,
+    SegmentResult,
+)
 from easy_capture.core.crop import (
     apply_aspect_lock,
     centroid_of_mask,
@@ -538,3 +545,530 @@ class TestEmptyMaskError:
         box = usecase.make_crop_box(frame, request)
 
         assert len(box) == 4
+
+
+# ---------------------------------------------------------------------------
+# segment() 단위 테스트 (crop-ux 슬라이스 신규)
+# ---------------------------------------------------------------------------
+# 테스트 상수
+_SEG_CLICK_X = 200
+_SEG_CLICK_Y = 150
+_FRAME_W = FAKE_FRAME_W
+_FRAME_H = FAKE_FRAME_H
+
+
+class TestSegment:
+    """ImageCaptureUseCase.segment: 클릭→SegmentResult(mask, centroid) 산출 / 빈 마스크 에러.
+
+    검증 범위(계획서 §6-1):
+      - 정상: SegmentResult 반환, mask는 bool HxW, centroid는 클릭 근방
+      - 빈 마스크: EmptyMaskError(메시지 "다시 클릭" 포함)
+      - segment 후 segment_image 호출 횟수가 정확히 1임을 카운터로 단언
+    """
+
+    def test_segment_정상_호출_시_SegmentResult를_반환한다(self):
+        """Given: FakeBackend(정상 마스크) 주입, 클릭 포인트 (200, 150)
+        When:  segment(frame, point) 호출
+        Then:  SegmentResult 인스턴스 반환
+        """
+        # --- Given ---
+        backend = FakeBackend()
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=backend)
+        frame = FakeFrameSource().read_frame()
+
+        # --- When ---
+        result = usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+        # --- Then ---
+        assert isinstance(result, SegmentResult)
+
+    def test_segment_결과_mask는_bool_HxW_배열이다(self):
+        """Given: FakeBackend 주입
+        When:  segment 호출
+        Then:  result.mask.dtype == bool, shape == (H, W)
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=FakeBackend())
+        frame = FakeFrameSource().read_frame()
+
+        # --- When ---
+        result = usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+        # --- Then ---
+        assert result.mask.dtype == bool, f"mask dtype이 bool이 아님: {result.mask.dtype}"
+        assert result.mask.shape == (_FRAME_H, _FRAME_W), (
+            f"mask shape 불일치: {result.mask.shape}"
+        )
+
+    def test_segment_결과_centroid는_클릭_포인트_근방이다(self):
+        """Given: 클릭 포인트 (200, 150), FakeBackend (반경 20px 사각 마스크)
+        When:  segment 호출
+        Then:  centroid가 (200, 150) 근방 (±FAKE_MASK_HALF+1 이내)
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=FakeBackend())
+        frame = FakeFrameSource().read_frame()
+
+        # --- When ---
+        result = usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+        # --- Then ---
+        cx, cy = result.centroid
+        assert abs(cx - _SEG_CLICK_X) <= FAKE_MASK_HALF + 1, (
+            f"centroid X 불일치: {cx:.1f} vs 기대 {_SEG_CLICK_X}"
+        )
+        assert abs(cy - _SEG_CLICK_Y) <= FAKE_MASK_HALF + 1, (
+            f"centroid Y 불일치: {cy:.1f} vs 기대 {_SEG_CLICK_Y}"
+        )
+
+    def test_segment_결과_centroid는_float_튜플이다(self):
+        """Given: FakeBackend 주입
+        When:  segment 호출
+        Then:  centroid는 길이 2 튜플이고 각 요소가 float(또는 int)
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=FakeBackend())
+        frame = FakeFrameSource().read_frame()
+
+        # --- When ---
+        result = usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+        # --- Then ---
+        assert len(result.centroid) == 2
+        assert isinstance(result.centroid[0], (int, float))
+        assert isinstance(result.centroid[1], (int, float))
+
+    def test_segment_1회_호출_시_segment_image_호출_횟수가_1이다(self):
+        """Given: FakeBackend(segment_call_count 스파이)
+        When:  segment 1회 호출
+        Then:  backend.segment_call_count == 1 (세그 1회만 발생)
+        """
+        # --- Given ---
+        backend = FakeBackend()
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=backend)
+        frame = FakeFrameSource().read_frame()
+
+        # --- When ---
+        usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+        # --- Then ---
+        assert backend.segment_call_count == 1, (
+            f"segment_image 호출 횟수 불일치: {backend.segment_call_count}"
+        )
+
+    def test_segment_빈_마스크_반환_시_EmptyMaskError가_발생한다(self):
+        """Given: FakeBackend(empty_mask=True)
+        When:  segment 호출
+        Then:  EmptyMaskError 발생
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(
+            source=FakeFrameSource(), backend=FakeBackend(empty_mask=True)
+        )
+        frame = FakeFrameSource().read_frame()
+
+        # --- When / Then ---
+        with pytest.raises(EmptyMaskError):
+            usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+    def test_segment_빈_마스크_에러_메시지는_한국어_안내를_포함한다(self):
+        """Given: FakeBackend(empty_mask=True)
+        When:  segment 호출 → EmptyMaskError 발생
+        Then:  메시지에 "다시 클릭" 포함 (기존 정책 유지)
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(
+            source=FakeFrameSource(), backend=FakeBackend(empty_mask=True)
+        )
+        frame = FakeFrameSource().read_frame()
+
+        # --- When / Then ---
+        with pytest.raises(EmptyMaskError, match="다시 클릭"):
+            usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+    def test_segment_SegmentResult는_frozen_dataclass이다(self):
+        """Given: 유효한 SegmentResult 인스턴스
+        When:  필드를 수정 시도
+        Then:  FrozenInstanceError(또는 AttributeError) 발생 — 불변 보장
+
+        WHY: frozen=True dataclass는 실수로 캐시된 세그 결과를 덮어쓰는
+             버그를 컴파일 타임에 차단한다.
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=FakeBackend())
+        frame = FakeFrameSource().read_frame()
+        result = usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+
+        # --- When / Then ---
+        with pytest.raises((AttributeError, TypeError)):
+            result.centroid = (0.0, 0.0)  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# compute_box() 단위 테스트 (crop-ux 슬라이스 신규)
+# ---------------------------------------------------------------------------
+# 테스트 상수 — 고정 centroid (세그 독립)
+_CENTROID = (200.0, 150.0)
+_BASE_BOX_SIZE = (300, 200)
+_BASE_FRAME_SHAPE = (_FRAME_W, _FRAME_H)  # (W, H)
+
+
+class TestComputeBox:
+    """ImageCaptureUseCase.compute_box: centroid + BoxParams → 크롭박스 순수 계산.
+
+    검증 범위(계획서 §6-1):
+      - 순수성: compute_box 반복 호출 시 segment_image 미호출(카운터 0 유지)
+      - 종횡비 변경 시 박스 비율 변화 (aspect None / 1:1 / 9:16 / 16:9)
+      - 박스 크기 단조성: box_size 증가 → 박스 변 길이 증가 또는 동일
+      - 항상 짝수 반환, 프레임 경계 내
+    """
+
+    def _make_usecase(self) -> tuple[ImageCaptureUseCase, FakeBackend]:
+        """usecase + 스파이 백엔드 쌍을 반환한다."""
+        backend = FakeBackend()
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=backend)
+        return usecase, backend
+
+    def test_compute_box_반환값은_4_튜플이다(self):
+        """Given: 고정 centroid, 기본 BoxParams
+        When:  compute_box 호출
+        Then:  길이 4의 정수 튜플
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        result = usecase.compute_box(_CENTROID, params)
+
+        # --- Then ---
+        assert len(result) == 4
+        assert all(isinstance(v, int) for v in result)
+
+    def test_compute_box_결과는_짝수_크기이다(self):
+        """Given: aspect=None, 기본 크기
+        When:  compute_box 호출
+        Then:  (x2-x1) % 2 == 0, (y2-y1) % 2 == 0
+
+        WHY: yuv420p 인코딩 요구사항. core.make_crop_box의 짝수 정렬이
+             compute_box 경로에서도 보존됨을 검증한다.
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+
+        # --- Then ---
+        assert (x2 - x1) % 2 == 0, f"너비 {x2 - x1}이 홀수"
+        assert (y2 - y1) % 2 == 0, f"높이 {y2 - y1}이 홀수"
+
+    def test_compute_box_결과는_프레임_경계_내에_있다(self):
+        """Given: aspect=None, 기본 크기
+        When:  compute_box 호출
+        Then:  0 <= x1, x2 <= FRAME_W, 0 <= y1, y2 <= FRAME_H
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+
+        # --- Then ---
+        assert 0 <= x1 and x2 <= _FRAME_W, f"X 경계 위반: x1={x1}, x2={x2}"
+        assert 0 <= y1 and y2 <= _FRAME_H, f"Y 경계 위반: y1={y1}, y2={y2}"
+
+    def test_compute_box_반복_호출_시_segment_image_호출_횟수가_0이다(self):
+        """Given: FakeBackend 스파이, segment 미호출 상태
+        When:  compute_box를 5회 반복 호출
+        Then:  backend.segment_call_count == 0 (재세그 없음)
+
+        WHY: 이것이 이 슬라이스의 핵심 회귀 가드.
+             종횡비/크기 슬라이더 조작마다 compute_box가 호출되는데,
+             segment_image를 재호출하면 매 조작마다 1~3s 멈춤이 발생한다.
+             이 테스트가 통과하면 분리가 올바르게 구현된 것이다.
+        """
+        # 반복 횟수 상수
+        COMPUTE_BOX_CALL_COUNT = 5
+
+        # --- Given ---
+        usecase, backend = self._make_usecase()
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        for _ in range(COMPUTE_BOX_CALL_COUNT):
+            usecase.compute_box(_CENTROID, params)
+
+        # --- Then ---
+        assert backend.segment_call_count == 0, (
+            f"compute_box 호출 중 segment_image가 {backend.segment_call_count}회 호출됨. "
+            "compute_box는 순수 함수여야 한다 — 모델 호출 금지."
+        )
+
+    def test_compute_box_segment_1회_후_compute_box_여러_번_호출_시_세그_횟수가_1이다(self):
+        """Given: segment 1회 호출 후 centroid 보관
+        When:  compute_box를 3회 추가 호출
+        Then:  backend.segment_call_count == 1 (세그는 여전히 1회뿐)
+
+        WHY: 실제 UI 시나리오(클릭 1회 → 슬라이더 조작 N회)를 재현한다.
+             세그는 클릭 시 1회뿐이어야 함을 단언한다.
+        """
+        # --- Given ---
+        EXTRA_COMPUTE_CALLS = 3
+        usecase, backend = self._make_usecase()
+        frame = FakeFrameSource().read_frame()
+
+        # 세그 1회 (클릭 시뮬레이션)
+        seg_result = usecase.segment(frame, (_SEG_CLICK_X, _SEG_CLICK_Y))
+        assert backend.segment_call_count == 1  # 전제 확인
+
+        # --- When ---
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+        for _ in range(EXTRA_COMPUTE_CALLS):
+            usecase.compute_box(seg_result.centroid, params)
+
+        # --- Then ---
+        assert backend.segment_call_count == 1, (
+            f"segment_image 호출 횟수가 1이어야 하는데 {backend.segment_call_count}임. "
+            "compute_box는 세그를 재호출해서는 안 된다."
+        )
+
+    def test_compute_box_종횡비_None은_요청_크기_박스를_반환한다(self):
+        """Given: aspect=None, box_size=(300, 200)
+        When:  compute_box 호출
+        Then:  박스 너비 ≈ 300, 높이 ≈ 200 (짝수 정렬 오차 ±2 허용)
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=(300, 200), aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+        w, h = x2 - x1, y2 - y1
+
+        # --- Then ---
+        # 짝수 정렬로 ±2 이내
+        assert abs(w - 300) <= 2, f"너비 불일치: {w} vs 300"
+        assert abs(h - 200) <= 2, f"높이 불일치: {h} vs 200"
+
+    def test_compute_box_종횡비_1대1_적용_시_너비와_높이가_같다(self):
+        """Given: aspect='1:1', box_size=(300, 200)
+        When:  compute_box 호출
+        Then:  박스 너비 == 박스 높이 (짝수 정렬 오차 ±2)
+
+        WHY: apply_aspect_lock이 박스 안쪽으로 축소하므로
+             w:h가 정확히 1:1이 되어야 한다.
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=(300, 200), aspect="1:1", frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+        w, h = x2 - x1, y2 - y1
+
+        # --- Then ---
+        assert abs(w - h) <= 2, f"1:1 종횡비 위반: w={w}, h={h}"
+
+    def test_compute_box_종횡비_9대16_적용_시_비율이_맞다(self):
+        """Given: aspect='9:16', box_size=(300, 300), 충분히 큰 프레임
+        When:  compute_box 호출
+        Then:  w*16 ≈ h*9 (짝수 정렬 오차 ±2 허용)
+        """
+        # --- Given ---
+        # 9:16 종횡비를 확인하려면 프레임이 충분히 커야 한다
+        LARGE_FRAME = (1920, 1080)
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=(300, 300), aspect="9:16", frame_shape=LARGE_FRAME
+        )
+
+        # --- When ---
+        x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+        w, h = x2 - x1, y2 - y1
+
+        # --- Then ---
+        # w/h ≈ 9/16  →  w*16 ≈ h*9
+        assert abs(w * 16 - h * 9) <= 2 * 16, (
+            f"9:16 종횡비 불일치: w={w}, h={h}, w*16={w*16}, h*9={h*9}"
+        )
+
+    def test_compute_box_종횡비_16대9_적용_시_비율이_맞다(self):
+        """Given: aspect='16:9', box_size=(300, 300), 충분히 큰 프레임
+        When:  compute_box 호출
+        Then:  w*9 ≈ h*16 (짝수 정렬 오차 허용)
+        """
+        # --- Given ---
+        LARGE_FRAME = (1920, 1080)
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=(300, 300), aspect="16:9", frame_shape=LARGE_FRAME
+        )
+
+        # --- When ---
+        x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+        w, h = x2 - x1, y2 - y1
+
+        # --- Then ---
+        assert abs(w * 9 - h * 16) <= 2 * 9, (
+            f"16:9 종횡비 불일치: w={w}, h={h}"
+        )
+
+    def test_compute_box_크기_증가_시_박스가_단조_증가한다(self):
+        """Given: aspect=None, box_size를 100→200→300으로 증가
+        When:  compute_box를 각 크기로 호출
+        Then:  박스 너비가 단조 비감소 (작은 크기 <= 큰 크기)
+
+        WHY: 슬라이더를 오른쪽으로 움직이면 박스가 커져야 한다.
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        sizes = [(100, 100), (200, 200), (300, 300)]
+
+        # --- When ---
+        widths = []
+        for size in sizes:
+            params = BoxParams(
+                box_size=size, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+            )
+            x1, y1, x2, y2 = usecase.compute_box(_CENTROID, params)
+            widths.append(x2 - x1)
+
+        # --- Then ---
+        for i in range(len(widths) - 1):
+            assert widths[i] <= widths[i + 1], (
+                f"단조성 위반: size={sizes[i]}→width={widths[i]}, "
+                f"size={sizes[i+1]}→width={widths[i+1]}"
+            )
+
+    def test_compute_box_동일_파라미터_반복_호출_시_결과가_동일하다(self):
+        """Given: 동일한 centroid + BoxParams
+        When:  compute_box를 3회 호출
+        Then:  모든 결과가 동일 (순수 함수 멱등성)
+        """
+        # --- Given ---
+        usecase, _ = self._make_usecase()
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When ---
+        results = [usecase.compute_box(_CENTROID, params) for _ in range(3)]
+
+        # --- Then ---
+        assert results[0] == results[1] == results[2], (
+            f"순수 함수 멱등성 위반: {results}"
+        )
+
+    def test_compute_box_BoxParams는_frozen_dataclass이다(self):
+        """Given: BoxParams 인스턴스
+        When:  필드 수정 시도
+        Then:  FrozenInstanceError(또는 AttributeError) 발생 — 불변 보장
+        """
+        # --- Given ---
+        params = BoxParams(
+            box_size=_BASE_BOX_SIZE, aspect=None, frame_shape=_BASE_FRAME_SHAPE
+        )
+
+        # --- When / Then ---
+        with pytest.raises((AttributeError, TypeError)):
+            params.aspect = "1:1"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# make_crop_box 무회귀 확인 (A안 위임 조합자)
+# ---------------------------------------------------------------------------
+class TestMakeCropBoxNoRegression:
+    """make_crop_box가 segment+compute_box 위임 후에도 동일 결과를 내는지 검증.
+
+    WHY: 계획서 A안 — make_crop_box를 두 메서드 위임으로 재작성하되
+         기존 계약(동일 결과)은 보존한다. 이 클래스가 통과하면 위임이
+         올바르게 조합됐음을 증명한다.
+    """
+
+    def test_make_crop_box_위임_후_독립계산과_동일한_결과를_반환한다(self):
+        """Given: FakeBackend + FakeFrameSource, 클릭 (200, 150), aspect=None
+        When:  make_crop_box 호출
+        Then:  _expected_crop_box 독립 계산과 동일 결과
+
+        WHY: make_crop_box가 segment→compute_box를 올바르게 위임하는지
+             end-to-end로 확인한다(A안 위임 정확성).
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=FakeBackend())
+        frame = FakeFrameSource().read_frame()
+        request = CropRequest(
+            point=(CLICK_X, CLICK_Y),
+            box_size=(REQUEST_CROP_W, REQUEST_CROP_H),
+            aspect=None,
+        )
+
+        # --- When ---
+        actual = usecase.make_crop_box(frame, request)
+        expected = _expected_crop_box(CLICK_X, CLICK_Y, REQUEST_CROP_W, REQUEST_CROP_H, None)
+
+        # --- Then ---
+        assert actual == expected, (
+            f"make_crop_box 위임 결과 {actual}이 독립계산 {expected}와 다름."
+        )
+
+    def test_make_crop_box_종횡비_9대16_위임_후_무회귀(self):
+        """Given: aspect='9:16'
+        When:  make_crop_box 호출
+        Then:  _expected_crop_box(aspect='9:16')와 동일 결과
+        """
+        # --- Given ---
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=FakeBackend())
+        frame = FakeFrameSource().read_frame()
+        request = CropRequest(
+            point=(CLICK_X, CLICK_Y),
+            box_size=(REQUEST_CROP_W, REQUEST_CROP_H),
+            aspect="9:16",
+        )
+
+        # --- When ---
+        actual = usecase.make_crop_box(frame, request)
+        expected = _expected_crop_box(CLICK_X, CLICK_Y, REQUEST_CROP_W, REQUEST_CROP_H, "9:16")
+
+        # --- Then ---
+        assert actual == expected
+
+    def test_make_crop_box_호출_1회당_segment_image도_1회_호출된다(self):
+        """Given: FakeBackend 스파이
+        When:  make_crop_box 1회 호출
+        Then:  segment_image 호출 횟수 == 1 (내부 segment 위임이 1회만 세그함)
+        """
+        # --- Given ---
+        backend = FakeBackend()
+        usecase = ImageCaptureUseCase(source=FakeFrameSource(), backend=backend)
+        frame = FakeFrameSource().read_frame()
+        request = CropRequest(
+            point=(CLICK_X, CLICK_Y),
+            box_size=(REQUEST_CROP_W, REQUEST_CROP_H),
+            aspect=None,
+        )
+
+        # --- When ---
+        usecase.make_crop_box(frame, request)
+
+        # --- Then ---
+        assert backend.segment_call_count == 1, (
+            f"make_crop_box가 segment_image를 {backend.segment_call_count}회 호출함. "
+            "위임 조합자는 segment를 정확히 1회만 호출해야 한다."
+        )

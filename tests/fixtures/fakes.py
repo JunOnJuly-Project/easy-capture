@@ -6,9 +6,10 @@ FakeFrameSource — FrameSource Protocol 준수. PyAV/ffprobe 비의존.
 두 클래스 모두 결정적(deterministic) 출력을 보장해 단위 테스트에서
 예측 가능한 centroid·마스크를 계산할 수 있게 한다.
 
-NOTE: FakeFrameSource는 `from easy_capture.infra.video_io import FrameMeta, FrameSource`
-를 import 한다. 구현 단계에서 채워질 것이므로 현 단계에서는 ImportError가 발생한다.
-이는 TDD Red 단계에서 정상 동작이다.
+변경 이력:
+  - segment_call_count: segment_image 호출 횟수 카운터 추가 (crop-ux 슬라이스).
+    WHY: compute_box 반복 호출 시 세그가 재실행되지 않는다는 핵심 회귀 가드를
+         FakeBackend 단독으로 검증할 수 있게 한다.
 """
 from __future__ import annotations
 
@@ -63,6 +64,12 @@ class FakeBackend:
     - 클릭 포인트(points)가 주어지면 그 주변 사각형
     - 포인트가 없으면 프레임 중앙 사각형
     - empty_mask=True이면 픽셀이 전부 False인 빈 마스크를 반환(빈 마스크 경로 테스트용)
+
+    속성:
+        segment_call_count: segment_image 호출 횟수 스파이 카운터.
+            WHY: compute_box 반복 호출 시 segment_image가 재호출되지 않는다는
+                 "재세그 안 함" 핵심 회귀 가드를 테스트에서 직접 단언하기 위해.
+                 기존 결정적 마스크 동작은 이 카운터 추가로 변경되지 않는다.
     """
 
     def __init__(self, device: str = "cpu", empty_mask: bool = False) -> None:
@@ -72,6 +79,8 @@ class FakeBackend:
         """
         self.device = device
         self._empty_mask = empty_mask
+        # 호출 횟수 카운터 — 초기값 0, segment_image 호출마다 +1
+        self.segment_call_count: int = 0
 
     def segment_image(
         self,
@@ -79,13 +88,15 @@ class FakeBackend:
         points=None,
         boxes=None,
     ) -> np.ndarray:
-        """결정적 bool HxW 마스크를 반환한다.
+        """결정적 bool HxW 마스크를 반환한다. 호출마다 segment_call_count를 증가한다.
 
         Given: RGB HxWx3 프레임 + 선택적 클릭 포인트
         When:  포인트가 있으면 첫 번째 포인트 주변, 없으면 프레임 중앙
         When:  empty_mask=True이면 전부 False인 빈 마스크
         Then:  bool dtype, 프레임과 동일한 (H, W) shape
         """
+        # WHY: 카운터를 먼저 증가시켜야 empty_mask 조기 반환에서도 카운트된다.
+        self.segment_call_count += 1
         h, w = frame.shape[:2]
 
         if self._empty_mask:
