@@ -28,6 +28,7 @@ from easy_capture.core.crop import (
 )
 from easy_capture.core.export.image_export import ExportConfig, crop_array, save_image
 from easy_capture.core.segmentation.backend import SegmentationBackend
+from easy_capture.core.upscale.backend import UpscaleBackend
 from easy_capture.infra.video_io import FrameSource
 
 
@@ -166,11 +167,18 @@ class ImageCaptureUseCase:
         frame: np.ndarray,
         box: tuple[int, int, int, int],
         target: tuple[str, ExportConfig],
+        upscaler: UpscaleBackend | None = None,
     ) -> None:
-        """크롭 후 path에 config 포맷으로 저장한다.
+        """크롭 → (옵션) 업스케일 → 저장.
 
-        target: (path, ExportConfig) — 매개변수 3개 이내 규칙을 위해 튜플로 묶음.
+        upscaler가 None이면 기존 즉시 저장 경로(무회귀). 주어지면 크롭 결과만
+        업스케일(전체 프레임 아님) 후 저장. 무거운 추론은 호출자(워커)가 책임진다.
+
+        WHY: 업스케일을 별도 단계로 끼워 순수(crop/save)와 무거움(upscale)을 분리.
+             upscaler 주입은 DIP — usecase는 UpscaleBackend Protocol에만 의존.
+             target 튜플 묶음으로 위치 인자 3개 유지(매개변수 규칙 준수).
         """
         path, config = target
         cropped = crop_array(frame, box)
-        save_image(cropped, path, config)
+        image = upscaler.upscale(cropped) if upscaler is not None else cropped
+        save_image(image, path, config)
