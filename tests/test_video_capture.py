@@ -2,7 +2,8 @@
 
 대상 모듈: easy_capture.app.video_capture
 테스트 더블: FakeVideoBackend (tests/fixtures/fakes.py),
-             FakeFrameSource  (tests/fixtures/fakes.py)
+             FakeFrameSource  (tests/fixtures/fakes.py),
+             FakeDetectionBackend (tests/fixtures/fakes.py) — 신규
 
 이 테스트 파일이 검증하는 계약:
   1. Protocol 계약   — isinstance(FakeVideoBackend(), VideoSegmentationBackend) 통과
@@ -17,8 +18,16 @@
  10. compute_boxes() 종횡비/크기 변경 재호출 — 박스 크기 재계산, 재추적 없음
  11. gap_policy BACKGROUND + empty_after — 출력 인덱스 전 프레임 유지 검증
  12. TrackResult frozen dataclass 불변식
+ 13. (신규) 샷경계 재추적 — FakeDetectionBackend 주입 컷 시나리오 4종
+     a. 재매칭 통과   → objid 유지·centroids 이어짐·propagate==샷수·detect==컷수
+     b. 재매칭 미달   → needs_correction 플래그
+     c. 다중 후보     → best 가까운 것 선택·통과
+     d. 빈 검출       → needs_correction 플래그
+ 14. (신규) 순수성 이중 가드 — compute_boxes 반복 시 propagate·detect 카운터 불변
+ 15. (신규) detector=None 하위호환 — 단일 샷 동작 그대로
 
-구현 전 RED 상태가 정상: VideoCaptureUseCase·TrackResult·VideoCropParams 미구현.
+구현 전 RED 상태가 정상(13-15):
+  VideoCaptureUseCase.detector 파라미터·TrackResult.needs_correction·cut_frames 미구현.
 """
 from __future__ import annotations
 
@@ -47,12 +56,41 @@ except ModuleNotFoundError:
     VideoSegmentationBackend = None  # type: ignore[assignment,misc]
     _HAS_VIDEO_USECASE = False
 
-from tests.fixtures.fakes import FakeFrameSource, FakeVideoBackend
+# --- 샷경계 재추적 신규 심볼 — 구현 전이므로 try/except 격리 ---
+# WHY: TrackResult에 needs_correction·cut_frames 필드가 아직 없으면
+#      기존 216개 테스트를 차단하지 않고 신규 테스트만 FAIL 처리된다.
+try:
+    # needs_correction·cut_frames 필드 존재 여부로 신규 구현 판별
+    _probe = TrackResult(
+        masks=[], centroids=[], needs_correction=[], cut_frames=[]
+    ) if TrackResult is not None else None
+    _HAS_RETRACK_FIELDS = (_probe is not None)
+except TypeError:
+    # frozen dataclass에 없는 필드 → 아직 미구현
+    _HAS_RETRACK_FIELDS = False
+
+# FakeDetectionBackend — fakes.py에 이미 추가됨
+from tests.fixtures.fakes import FakeDetectionBackend, FakeFrameSource, FakeVideoBackend
+
+# DetectionBackend Protocol — 구현 전 격리
+try:
+    from easy_capture.core.segmentation.detection_backend import Detection
+    _HAS_DETECTION = True
+except ImportError:
+    Detection = None  # type: ignore[assignment]
+    _HAS_DETECTION = False
 
 # 미구현 시 전 테스트 skip 이유 메시지
 _MSG_NOT_IMPL = (
     "easy_capture.app.video_capture 또는 "
     "easy_capture.core.segmentation.video_backend 미구현 — RED 예상"
+)
+_MSG_NO_RETRACK = (
+    "VideoCaptureUseCase.detector 파라미터 또는 "
+    "TrackResult.needs_correction·cut_frames 미구현 — RED 예상"
+)
+_MSG_NO_DETECTION = (
+    "core/segmentation/detection_backend.py에 Detection 미구현 — RED 예상"
 )
 
 # ---------------------------------------------------------------------------
@@ -85,6 +123,33 @@ SMOOTH_WINDOW = 3
 
 # compute_boxes 반복 호출 횟수 (순수성 가드용)
 COMPUTE_BOXES_REPEAT = 5
+
+# ---------------------------------------------------------------------------
+# 샷경계 재추적 상수
+# ---------------------------------------------------------------------------
+# 2샷 시나리오 — 전체 20프레임, 컷 1개(프레임 10)
+RETRACK_FRAME_COUNT = 20   # 전체 프레임 수
+RETRACK_CUT_FRAME = 10     # 컷 위치(이 프레임부터 2번째 샷)
+RETRACK_SHOT1_LEN = RETRACK_CUT_FRAME              # 첫 샷 길이 = 10
+RETRACK_SHOT2_LEN = RETRACK_FRAME_COUNT - RETRACK_CUT_FRAME  # 두 번째 샷 길이 = 10
+RETRACK_SHOT_COUNT = 2     # 2샷
+RETRACK_CUT_COUNT = 1      # 컷 1개
+
+# 3샷 시나리오 — 전체 30프레임, 컷 2개
+RETRACK_3SHOT_FRAMES = 30
+RETRACK_CUT1 = 10
+RETRACK_CUT2 = 20
+RETRACK_3SHOT_COUNT = 3
+RETRACK_2CUT_COUNT = 2
+
+# 재매칭용 박스 — FakeVideoBackend 마스크에서 추출될 prev_box 근방
+# FakeVideoBackend는 cx=CLICK_X, cy=CLICK_Y 기준 half=20 사각형 마스크 생성
+# → bbox ≈ (300, 160, 339, 199). 통과 후보는 근접 위치, 미달 후보는 먼 위치
+RETRACK_PASS_BOX = (305, 165, 344, 204)   # PREV_BOX와 IoU ≥ 0.5 예상
+RETRACK_FAIL_BOX = (  0,   0,  50,  50)  # 화면 좌상단 — IoU ≈ 0.0
+
+# compute_boxes 이중 순수성 가드용 반복 횟수
+RETRACK_COMPUTE_REPEAT = 4
 
 
 # ---------------------------------------------------------------------------
@@ -890,4 +955,729 @@ class TestExportGapPolicy:
         indices = build_output_indices(valid_flags, GapPolicy.BACKGROUND)
         assert len(indices) == FRAME_COUNT, (
             f"result=None BACKGROUND 인덱스 수 불일치: {len(indices)} vs {FRAME_COUNT}"
+        )
+
+
+# ===========================================================================
+# 샷경계 재추적 테스트 (슬라이스 핵심 가드)
+# ===========================================================================
+# 픽스처 헬퍼 — 재추적 시나리오 공용
+# ---------------------------------------------------------------------------
+
+def _make_retrack_frames(n: int = RETRACK_FRAME_COUNT) -> list[np.ndarray]:
+    """재추적 시나리오용 n개 고정 RGB 프레임 리스트 반환."""
+    src = FakeFrameSource()
+    return [src.read_frame(i) for i in range(n)]
+
+
+def _make_retrack_usecase(
+    detector: "FakeDetectionBackend | None",
+    drift: tuple[int, int] = (0, 0),
+) -> tuple["VideoCaptureUseCase", FakeVideoBackend]:
+    """FakeVideoBackend + FakeDetectionBackend 주입 VideoCaptureUseCase 반환.
+
+    WHY: detector 파라미터가 추가된 새 생성자 계약을 테스트에서 직접 검증한다.
+         detector=None이면 기존(단일 샷) 경로로 fallback — 하위호환 확인용.
+    """
+    backend = FakeVideoBackend(drift=drift, empty_after=None)
+    usecase = VideoCaptureUseCase(
+        source=FakeFrameSource(),
+        backend=backend,
+        detector=detector,
+    )
+    return usecase, backend
+
+
+# ---------------------------------------------------------------------------
+# FakeDetectionBackend Protocol 계약 테스트
+# ---------------------------------------------------------------------------
+class TestFakeDetectionBackendContract:
+    """FakeDetectionBackend가 DetectionBackend Protocol 요구를 만족하는지 검증."""
+
+    def test_FakeDetectionBackend_초기_detect_call_count는_0이다(self):
+        """Given: 새 FakeDetectionBackend
+        When:  아무것도 호출 안 함
+        Then:  detect_call_count == 0
+        """
+        fake = FakeDetectionBackend()
+        assert fake.detect_call_count == 0
+
+    def test_FakeDetectionBackend_detect_호출마다_카운터가_증가한다(self):
+        """Given: FakeDetectionBackend(candidates_fixed=[])
+        When:  detect 3회 호출
+        Then:  detect_call_count == 3
+        """
+        fake = FakeDetectionBackend()
+        dummy_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+        fake.detect(dummy_frame, "person")
+        fake.detect(dummy_frame, "person")
+        fake.detect(dummy_frame, "person")
+
+        assert fake.detect_call_count == 3
+
+    def test_FakeDetectionBackend_fixed_후보는_매_호출마다_동일하게_반환한다(self):
+        """Given: candidates_fixed=[dummy]
+        When:  detect 2회 호출
+        Then:  두 결과가 동일 길이
+        """
+        # Detection 미구현이면 dict로 대체 — 길이만 검증
+        dummy_candidates = [{"box": (0, 0, 10, 10)}]
+        fake = FakeDetectionBackend(candidates_fixed=dummy_candidates)
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+        r1 = fake.detect(frame, "person")
+        r2 = fake.detect(frame, "person")
+
+        assert len(r1) == len(r2) == 1
+
+    def test_FakeDetectionBackend_sequence_모드는_순서대로_반환한다(self):
+        """Given: candidates_sequence=[[a], [b, c], []]
+        When:  detect 3회 호출
+        Then:  각 호출마다 순서대로 길이 1, 2, 0 반환
+        """
+        fake = FakeDetectionBackend(
+            candidates_sequence=[
+                [{"box": (0, 0, 10, 10)}],
+                [{"box": (0, 0, 10, 10)}, {"box": (50, 50, 60, 60)}],
+                [],
+            ]
+        )
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+        r1 = fake.detect(frame, "person")
+        r2 = fake.detect(frame, "person")
+        r3 = fake.detect(frame, "person")
+
+        assert len(r1) == 1
+        assert len(r2) == 2
+        assert len(r3) == 0
+
+    def test_FakeDetectionBackend_빈_기본값이면_detect는_빈_리스트_반환한다(self):
+        """Given: FakeDetectionBackend() — 기본값
+        When:  detect 호출
+        Then:  [] 반환
+        """
+        fake = FakeDetectionBackend()
+        frame = np.zeros((360, 640, 3), dtype=np.uint8)
+
+        result = fake.detect(frame, "person")
+
+        assert result == []
+
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_FakeDetectionBackend는_DetectionBackend_isinstance를_통과한다(self):
+        """Given: FakeDetectionBackend 인스턴스
+        When:  isinstance(..., DetectionBackend) 호출
+        Then:  True
+
+        WHY: @runtime_checkable Protocol — 구조적 서브타이핑 런타임 검증.
+        """
+        from easy_capture.core.segmentation.detection_backend import DetectionBackend
+
+        fake = FakeDetectionBackend()
+        assert isinstance(fake, DetectionBackend)
+
+    def test_FakeDetectionBackend_device_속성이_cpu이다(self):
+        """Given: FakeDetectionBackend 인스턴스
+        When:  .device 접근
+        Then:  'cpu'
+        """
+        fake = FakeDetectionBackend()
+        assert fake.device == "cpu"
+
+
+# ---------------------------------------------------------------------------
+# 시나리오 (a): 재매칭 통과 → objid 유지·추적 지속
+# ---------------------------------------------------------------------------
+class TestRetrackPassScenario:
+    """컷 1개 + 재매칭 통과 시나리오 검증.
+
+    FakeVideoBackend + FakeDetectionBackend(통과 후보 주입)으로
+    GPU 없이 재추적 오케스트레이션 통과 경로를 완전 검증한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_통과_시_centroids가_두_샷에_걸쳐_이어진다(self):
+        """Given: 20프레임, 컷=[10], 통과 후보(RETRACK_PASS_BOX)
+        When:  track(frames, click, cut_frames=[10]) 호출
+        Then:  result.centroids 길이 == 20, 전부 None 아님
+
+        WHY: 재매칭 통과 → SAM2 재초기화 → 두 샷 centroids를 이어붙여
+             사용자에게 끊김 없는 단일 추적으로 노출한다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[pass_candidate])
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert len(result.centroids) == RETRACK_FRAME_COUNT
+        # 통과 → 재추적 성공 → needs_correction 전부 False
+        assert all(not nc for nc in result.needs_correction), (
+            "재매칭 통과 시 needs_correction이 전부 False여야 한다"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_통과_시_propagate_call_count가_샷_수와_같다(self):
+        """Given: 컷=[10] → 2샷
+        When:  track 호출
+        Then:  backend.propagate_call_count == 2 (샷마다 SAM2 재초기화·전파 1회)
+
+        WHY: 핵심 카운터 가드 — 컷마다 SAM2를 재초기화하므로
+             propagate 호출 수 == 샷 수 == 컷 수 + 1.
+             이 가드가 깨지면 재초기화 로직이 누락된 것이다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[pass_candidate])
+        usecase, backend = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert backend.propagate_call_count == RETRACK_SHOT_COUNT, (
+            f"propagate 호출 횟수 불일치: {backend.propagate_call_count} vs "
+            f"{RETRACK_SHOT_COUNT}(샷 수)"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_통과_시_detect_call_count가_컷_수와_같다(self):
+        """Given: 컷=[10] → 컷 1개
+        When:  track 호출
+        Then:  detector.detect_call_count == 1 (컷마다 1회 검출)
+
+        WHY: 핵심 카운터 가드 — 검출은 샷 경계마다 정확히 1회만 호출돼야 한다.
+             이 가드가 깨지면 불필요한 재검출이 발생해 성능이 저하된다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[pass_candidate])
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert detector.detect_call_count == RETRACK_CUT_COUNT, (
+            f"detect 호출 횟수 불일치: {detector.detect_call_count} vs "
+            f"{RETRACK_CUT_COUNT}(컷 수)"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_통과_시_cut_frames_필드에_컷_인덱스가_기록된다(self):
+        """Given: cut_frames=[10]
+        When:  track 호출
+        Then:  result.cut_frames == [10]
+
+        WHY: UI가 컷 위치를 표시하려면 TrackResult에 컷 인덱스가 필요하다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[pass_candidate])
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert result.cut_frames == [RETRACK_CUT_FRAME], (
+            f"cut_frames 불일치: {result.cut_frames}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 시나리오 (b): 재매칭 미달 → needs_correction 플래그
+# ---------------------------------------------------------------------------
+class TestRetrackFailScenario:
+    """컷 1개 + 재매칭 미달 시나리오 검증.
+
+    미달 시 추적을 점프하지 않고 needs_correction 플래그만 세운다.
+    수동 교정 UI(다음 슬라이스)를 위한 안전망이다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_미달_시_후속_샷_needs_correction이_True이다(self):
+        """Given: 컷=[10], 미달 후보(RETRACK_FAIL_BOX — IoU≈0)
+        When:  track 호출
+        Then:  result.needs_correction에서 후속 샷 구간(10~19)이 True
+
+        WHY: 미달은 추적 점프보다 "교정 필요 표시"가 안전하다(ADR 0006 "수동 교정 유도").
+             틀린 인물로 추적이 점프하면 사용자가 알아채기 어렵고
+             회복도 어렵다. 플래그는 명시적 피드백을 제공한다.
+        """
+        fail_candidate = Detection(box=RETRACK_FAIL_BOX, score=0.8, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[fail_candidate])
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        # 후속 샷(컷 이후 프레임) 구간에 needs_correction True가 최소 1개
+        shot2_correction = result.needs_correction[RETRACK_CUT_FRAME:]
+        assert any(shot2_correction), (
+            "재매칭 미달 시 후속 샷 구간에 needs_correction=True가 최소 1개여야 한다"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_미달_시_첫_샷_needs_correction은_False이다(self):
+        """Given: 컷=[10], 미달 후보
+        When:  track 호출
+        Then:  result.needs_correction[0:10] 전부 False
+
+        WHY: 첫 샷은 재매칭 없이 직접 클릭으로 시작했으므로 실패 없음.
+             플래그가 첫 샷에도 번지면 잘못된 구현이다.
+        """
+        fail_candidate = Detection(box=RETRACK_FAIL_BOX, score=0.8, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[fail_candidate])
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        shot1_correction = result.needs_correction[:RETRACK_CUT_FRAME]
+        assert all(not nc for nc in shot1_correction), (
+            "첫 샷 구간에 needs_correction=True가 있으면 안 된다"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_재매칭_미달_시_propagate_call_count와_detect_call_count_가드(self):
+        """Given: 컷=[10], 미달 후보
+        When:  track 호출
+        Then:  propagate_call_count == 2, detect_call_count == 1 (미달도 동일 횟수)
+
+        WHY: 미달 경로에서도 카운터 불변식을 지켜야 한다.
+             미달이라고 해서 detect 추가 호출이 발생하면 안 된다.
+        """
+        fail_candidate = Detection(box=RETRACK_FAIL_BOX, score=0.8, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[fail_candidate])
+        usecase, backend = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert backend.propagate_call_count == RETRACK_SHOT_COUNT
+        assert detector.detect_call_count == RETRACK_CUT_COUNT
+
+
+# ---------------------------------------------------------------------------
+# 시나리오 (c): 다중 후보 → best 선택
+# ---------------------------------------------------------------------------
+class TestRetrackMultiCandidateScenario:
+    """다중 후보 중 가장 가까운 후보(best)가 정확히 선택되는지 검증."""
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_다중_후보_중_best가_통과이면_needs_correction이_False이다(self):
+        """Given: 컷=[10], 후보 2개(가까운 것 + 먼 것 혼재)
+        When:  track 호출
+        Then:  needs_correction 후속 샷 전부 False (best가 통과했으므로)
+
+        WHY: argmax로 가장 가까운 후보를 선택해 통과하면 재추적이 이어져야 한다.
+             "먼 후보가 있다"는 이유만으로 재매칭을 실패 처리하면 안 된다.
+        """
+        # 먼 후보를 먼저, 가까운 후보를 나중에 — argmax 정확성 검증
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.7, feat=None)
+        fail_candidate = Detection(box=RETRACK_FAIL_BOX, score=0.95, feat=None)
+        # detect_score가 높더라도 rematch_score(IoU 기반)가 낮으면 미선택
+        detector = FakeDetectionBackend(
+            candidates_fixed=[fail_candidate, pass_candidate]
+        )
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        shot2_correction = result.needs_correction[RETRACK_CUT_FRAME:]
+        assert all(not nc for nc in shot2_correction), (
+            "다중 후보 중 best가 통과이면 후속 샷 needs_correction이 전부 False여야 한다"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_다중_후보에서도_detect_call_count는_컷_수이다(self):
+        """Given: 다중 후보
+        When:  track 호출
+        Then:  detect_call_count == 1 (다중 후보라도 컷 경계에서 1회만 호출)
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.7, feat=None)
+        fail_candidate = Detection(box=RETRACK_FAIL_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(
+            candidates_fixed=[fail_candidate, pass_candidate]
+        )
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert detector.detect_call_count == RETRACK_CUT_COUNT
+
+
+# ---------------------------------------------------------------------------
+# 시나리오 (d): 빈 검출 → 미달 처리
+# ---------------------------------------------------------------------------
+class TestRetrackEmptyDetectionScenario:
+    """컷 후 detect가 []를 반환하면 미달과 동일하게 처리한다."""
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    def test_빈_검출이면_후속_샷_needs_correction이_True이다(self):
+        """Given: 컷=[10], detect가 [] 반환(인물 없음)
+        When:  track 호출
+        Then:  후속 샷 구간 needs_correction에 True 존재
+
+        WHY: 화면에 인물이 없거나 검출기가 아무것도 찾지 못하면
+             빈 검출 = 미달로 동일 처리해야 한다(계획서 §2-4).
+        """
+        detector = FakeDetectionBackend(candidates_fixed=[])  # 항상 빈 리스트
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        shot2_correction = result.needs_correction[RETRACK_CUT_FRAME:]
+        assert any(shot2_correction), (
+            "빈 검출 시 후속 샷에 needs_correction=True가 있어야 한다"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    def test_빈_검출에서도_detect_call_count는_컷_수이다(self):
+        """Given: 빈 후보
+        When:  track 호출
+        Then:  detect_call_count == 1
+
+        WHY: 빈 결과라도 detect 자체는 컷 경계에서 정확히 1회 호출돼야 한다.
+        """
+        detector = FakeDetectionBackend(candidates_fixed=[])
+        usecase, _ = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        assert detector.detect_call_count == RETRACK_CUT_COUNT
+
+
+# ---------------------------------------------------------------------------
+# 카운터 이중 순수성 가드 — compute_boxes 반복 시 두 카운터 불변
+# ---------------------------------------------------------------------------
+class TestRetrackPurityGuard:
+    """compute_boxes 반복 호출 시 propagate·detect 카운터가 모두 불변이어야 한다.
+
+    WHY: 이것이 "무거움(track)/가벼움(compute_boxes) 분리" 불변식의 핵심 가드.
+         UI에서 종횡비·크기 슬라이더를 조작할 때마다 compute_boxes가 호출되는데,
+         그때마다 SAM2나 Grounding DINO가 재호출되면 매 조작마다 수 초 멈춤이 발생한다.
+         propagate_call_count·detect_call_count를 동시에 단언해 두 모델 호출이
+         모두 track 안에 가둬져 있음을 강제한다(계획서 §4-1).
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_compute_boxes_반복_호출_시_propagate와_detect_카운터_모두_불변이다(self):
+        """Given: track 1회(컷 1개·통과) → TrackResult 보관
+        When:  compute_boxes를 4회 반복 호출
+        Then:  backend.propagate_call_count == 2 (불변)
+               detector.detect_call_count == 1 (불변)
+
+        WHY: track 완료 후 compute_boxes를 아무리 반복해도 두 카운터가
+             track 직후 값에서 변하지 않아야 한다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[pass_candidate])
+        usecase, backend = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        # track 직후 카운터 기준값 포착
+        propagate_after_track = backend.propagate_call_count
+        detect_after_track = detector.detect_call_count
+
+        params = VideoCropParams(
+            box_size=(BOX_W, BOX_H),
+            aspect=None,
+            smooth_window=SMOOTH_WINDOW,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        for _ in range(RETRACK_COMPUTE_REPEAT):
+            usecase.compute_boxes(result, params, frame_size)
+
+        assert backend.propagate_call_count == propagate_after_track, (
+            f"compute_boxes 반복 중 propagate 재호출 감지: "
+            f"{backend.propagate_call_count} vs 기준 {propagate_after_track}. "
+            "compute_boxes는 순수 함수여야 한다 — SAM2 호출 금지."
+        )
+        assert detector.detect_call_count == detect_after_track, (
+            f"compute_boxes 반복 중 detect 재호출 감지: "
+            f"{detector.detect_call_count} vs 기준 {detect_after_track}. "
+            "compute_boxes는 순수 함수여야 한다 — Grounding DINO 호출 금지."
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_종횡비_변경_재호출_시에도_두_카운터_불변이다(self):
+        """Given: track 완료 후 aspect None→16:9→9:16 순 3회 compute_boxes
+        When:  각 aspect로 compute_boxes 호출
+        Then:  propagate·detect 카운터 모두 track 직후와 동일
+
+        WHY: UI 종횡비 콤보 변경 시나리오를 재현한다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(candidates_fixed=[pass_candidate])
+        usecase, backend = _make_retrack_usecase(detector)
+        frames = _make_retrack_frames(RETRACK_FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y), cut_frames=[RETRACK_CUT_FRAME])
+
+        propagate_base = backend.propagate_call_count
+        detect_base = detector.detect_call_count
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+
+        for aspect in [None, "16:9", "9:16"]:
+            params = VideoCropParams(
+                box_size=(BOX_W, BOX_H),
+                aspect=aspect,
+                smooth_window=SMOOTH_WINDOW,
+            )
+            usecase.compute_boxes(result, params, frame_size)
+
+        assert backend.propagate_call_count == propagate_base, (
+            "종횡비 변경 중 propagate 재호출 감지"
+        )
+        assert detector.detect_call_count == detect_base, (
+            "종횡비 변경 중 detect 재호출 감지"
+        )
+
+
+# ---------------------------------------------------------------------------
+# detector=None 하위호환 — 단일 샷 동작 무회귀
+# ---------------------------------------------------------------------------
+class TestRetrackDetectorNoneCompat:
+    """detector=None이면 첫 슬라이스(단일 샷) 동작 그대로 — 기존 계약 무회귀.
+
+    WHY: detector 파라미터 추가는 기존 코드를 깨면 안 된다.
+         detector=None은 "컷 감지·재매칭 건너뜀 = 단일 샷 경로" 계약이다.
+         기존 216개 테스트와 동일한 동작을 이 클래스가 추가로 보증한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    def test_detector_None이면_단일_샷_TrackResult를_반환한다(self):
+        """Given: VideoCaptureUseCase(detector=None), 10프레임
+        When:  track(frames, point) 호출 (cut_frames 미제공)
+        Then:  TrackResult 반환, centroids 길이 == FRAME_COUNT
+
+        WHY: detector=None은 기존 슬라이스 경로 — 변경 없음을 검증한다.
+        """
+        backend = FakeVideoBackend(drift=(DRIFT_DX, DRIFT_DY))
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=None,
+        )
+        frames = _make_frames(FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        assert isinstance(result, TrackResult)
+        assert len(result.centroids) == FRAME_COUNT
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    def test_detector_None이면_propagate_call_count가_1이다(self):
+        """Given: detector=None
+        When:  track 1회 호출
+        Then:  propagate_call_count == 1 (단일 샷 = 전파 1회)
+
+        WHY: detector=None이면 컷 감지를 건너뛰고 단일 전파만 수행한다.
+        """
+        backend = FakeVideoBackend()
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=None,
+        )
+        frames = _make_frames(FRAME_COUNT)
+
+        usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        assert backend.propagate_call_count == 1, (
+            f"detector=None 단일 샷: propagate={backend.propagate_call_count} ≠ 1"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    def test_detector_None이면_cut_frames_필드가_빈_리스트이다(self):
+        """Given: detector=None
+        When:  track 호출
+        Then:  result.cut_frames == [] (컷 감지 없음)
+
+        WHY: cut_frames 기본값이 빈 리스트여야 UI가 "컷 없음"으로 처리한다.
+        """
+        backend = FakeVideoBackend()
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=None,
+        )
+        frames = _make_frames(FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        assert result.cut_frames == [], (
+            f"detector=None이면 cut_frames == [], 실제: {result.cut_frames}"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    def test_detector_None이면_needs_correction이_전부_False이다(self):
+        """Given: detector=None
+        When:  track 호출
+        Then:  result.needs_correction 전부 False (재매칭 없음 = 교정 불필요)
+
+        WHY: 단일 샷 경로에서 needs_correction이 True이면 안 된다.
+             기존 export 경로(valid_flags = centroid 기반)에 영향을 주지 않음도 확인.
+        """
+        backend = FakeVideoBackend()
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=None,
+        )
+        frames = _make_frames(FRAME_COUNT)
+
+        result = usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        assert all(not nc for nc in result.needs_correction), (
+            "detector=None 단일 샷에서 needs_correction이 True인 프레임이 있으면 안 된다"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 다중 컷 누적 — 컷 2개(3샷) 카운터 가드
+# ---------------------------------------------------------------------------
+class TestRetrackMultiCutAccumulation:
+    """컷 2개(3샷) 시나리오 — 누적 카운터 가드."""
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_컷_2개_시_propagate_call_count가_3이다(self):
+        """Given: 30프레임, cut_frames=[10, 20] → 3샷
+        When:  track 호출
+        Then:  propagate_call_count == 3
+
+        WHY: 컷 k개 → k+1샷 → propagate k+1회.
+             다중 컷 시나리오에서도 카운터 가드가 성립하는지 확인한다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        # 컷 2개 → detect 2회 호출 → 시퀀스 2개 주입
+        detector = FakeDetectionBackend(
+            candidates_sequence=[
+                [pass_candidate],  # 첫 번째 컷(10) 재매칭 → 통과
+                [pass_candidate],  # 두 번째 컷(20) 재매칭 → 통과
+            ]
+        )
+        backend = FakeVideoBackend(drift=(0, 0))
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=detector,
+        )
+        frames = _make_retrack_frames(RETRACK_3SHOT_FRAMES)
+
+        usecase.track(
+            frames,
+            (CLICK_X, CLICK_Y),
+            cut_frames=[RETRACK_CUT1, RETRACK_CUT2],
+        )
+
+        assert backend.propagate_call_count == RETRACK_3SHOT_COUNT, (
+            f"3샷: propagate={backend.propagate_call_count} ≠ {RETRACK_3SHOT_COUNT}"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_컷_2개_시_detect_call_count가_2이다(self):
+        """Given: cut_frames=[10, 20] → 컷 2개
+        When:  track 호출
+        Then:  detect_call_count == 2
+
+        WHY: 컷 경계마다 detect 1회 → 총 컷 수만큼 호출 누적.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(
+            candidates_sequence=[
+                [pass_candidate],
+                [pass_candidate],
+            ]
+        )
+        backend = FakeVideoBackend(drift=(0, 0))
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=detector,
+        )
+        frames = _make_retrack_frames(RETRACK_3SHOT_FRAMES)
+
+        usecase.track(
+            frames,
+            (CLICK_X, CLICK_Y),
+            cut_frames=[RETRACK_CUT1, RETRACK_CUT2],
+        )
+
+        assert detector.detect_call_count == RETRACK_2CUT_COUNT, (
+            f"컷 2개: detect={detector.detect_call_count} ≠ {RETRACK_2CUT_COUNT}"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(not _HAS_RETRACK_FIELDS, reason=_MSG_NO_RETRACK)
+    @pytest.mark.skipif(not _HAS_DETECTION, reason=_MSG_NO_DETECTION)
+    def test_컷_2개_centroids_길이가_전체_프레임_수이다(self):
+        """Given: 30프레임, cut_frames=[10, 20], 전 컷 통과
+        When:  track 호출
+        Then:  len(result.centroids) == 30
+
+        WHY: 3샷 centroids를 이어붙인 결과가 전체 프레임 수와 일치해야
+             compute_boxes·export가 올바른 길이의 박스/크롭을 생성한다.
+        """
+        pass_candidate = Detection(box=RETRACK_PASS_BOX, score=0.95, feat=None)
+        detector = FakeDetectionBackend(
+            candidates_sequence=[
+                [pass_candidate],
+                [pass_candidate],
+            ]
+        )
+        backend = FakeVideoBackend(drift=(0, 0))
+        usecase = VideoCaptureUseCase(
+            source=FakeFrameSource(),
+            backend=backend,
+            detector=detector,
+        )
+        frames = _make_retrack_frames(RETRACK_3SHOT_FRAMES)
+
+        result = usecase.track(
+            frames,
+            (CLICK_X, CLICK_Y),
+            cut_frames=[RETRACK_CUT1, RETRACK_CUT2],
+        )
+
+        assert len(result.centroids) == RETRACK_3SHOT_FRAMES, (
+            f"centroids 길이 불일치: {len(result.centroids)} vs {RETRACK_3SHOT_FRAMES}"
         )
