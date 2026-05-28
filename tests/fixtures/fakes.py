@@ -36,7 +36,7 @@ import numpy as np
 # --- SegmentationBackend는 이미 존재 → import 가능 ---
 from easy_capture.core.segmentation.backend import SegmentationBackend  # noqa: F401
 
-from easy_capture.infra.video_io import FrameMeta, FrameSource  # noqa: F401
+from easy_capture.core.source.frame_source import FrameMeta, FrameSource  # noqa: F401
 
 # --- UpscaleBackend: 구현 전이므로 import 실패가 예상 RED 상태 ---
 # WHY: try/except로 감싸는 이유 — core/upscale 패키지가 아직 없을 때

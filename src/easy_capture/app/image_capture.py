@@ -29,7 +29,7 @@ from easy_capture.core.crop import (
 from easy_capture.core.export.image_export import ExportConfig, crop_array, save_image
 from easy_capture.core.segmentation.backend import SegmentationBackend
 from easy_capture.core.upscale.backend import UpscaleBackend
-from easy_capture.infra.video_io import FrameSource
+from easy_capture.core.source.frame_source import FrameSource
 
 
 class EmptyMaskError(Exception):

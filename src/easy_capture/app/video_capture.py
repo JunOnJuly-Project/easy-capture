@@ -43,7 +43,7 @@ from easy_capture.core.segmentation.video_backend import (
 from easy_capture.core.tracking.gap_policy import build_output_indices
 from easy_capture.core.tracking.rematch import RematchResult, select_best_match
 from easy_capture.core.tracking.shot_split import split_into_shots
-from easy_capture.infra.video_io import FrameSource, FrameSpan
+from easy_capture.core.source.frame_source import FrameSource, FrameSpan
 
 if TYPE_CHECKING:
     from easy_capture.core.segmentation.detection_backend import DetectionBackend

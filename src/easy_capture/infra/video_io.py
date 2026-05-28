@@ -2,19 +2,39 @@
 
 이미지 또는 동영상 파일에서 단일 프레임 또는 구간 프레임 시퀀스를
 RGB(BT.709 정규화) numpy 배열로 추출한다.
-app 레이어는 FrameSource Protocol에만 의존한다(DIP).
+app 레이어는 FrameSource Protocol에만 의존한다(ADR 0008 DIP).
 
 지원:
 - 이미지 파일 (.jpg/.jpeg/.png/.bmp/.webp 등): Pillow로 읽음
 - 동영상 파일 (.mp4/.mov/.avi 등): PyAV로 PTS 시크 후 1프레임 or 구간 디코드
+
+WHY: FrameSource·FrameSpan·FrameMeta·UnsupportedSourceError 추상은
+     core/source/frame_source.py로 이동했다(ADR 0008 정합).
+     하위 호환성을 위해 여기서 re-export한다 — 기존 import 경로가 동작한다.
+     구체 구현(_ImageFileSource, _VideoFrameSource)과 팩토리(open_source)는 여기 잔류.
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
 
 import numpy as np
+
+# 추상은 core에서 가져온다 (ADR 0008) — 구현만 여기 잔류
+from easy_capture.core.source.frame_source import (
+    FrameMeta,
+    FrameSource,
+    FrameSpan,
+    UnsupportedSourceError,
+)
+
+# re-export: 기존 infra.video_io import 경로 하위 호환 유지
+__all__ = [
+    "FrameMeta",
+    "FrameSource",
+    "FrameSpan",
+    "UnsupportedSourceError",
+    "open_source",
+]
 
 # 이미지 파일로 처리할 확장자 집합
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
@@ -23,66 +43,6 @@ _IMAGE_EXTENSIONS: frozenset[str] = frozenset(
 
 # 메모리 보호용 구간 최대 프레임 수 (fps 30 × 30초)
 _MAX_SPAN_FRAMES = 900
-
-
-class UnsupportedSourceError(Exception):
-    """지원하지 않는 파일 형식이거나 손상된 소스일 때 발생한다."""
-
-
-@dataclass(frozen=True)
-class FrameSpan:
-    """구간 추출 파라미터 묶음 (매개변수 3개 규칙용).
-
-    start: 시작 프레임 인덱스 (포함)
-    end: 종료 프레임 인덱스 (미포함, exclusive)
-    step: 다운샘플 간격 (기본 1 — 모든 프레임)
-
-    WHY: read_frames(start, end) 대신 dataclass로 묶어 매개변수 3개 규칙을 준수하고
-         향후 stride·fps 힌트 등 확장 시 시그니처 변경 없이 필드만 추가한다.
-    """
-
-    start: int
-    end: int  # exclusive
-    step: int = 1  # 다운샘플(움짤 프레임 수 절감, 기본 1)
-
-
-@dataclass(frozen=True)
-class FrameMeta:
-    """프레임/소스 메타 (UI 표시·검증용).
-
-    is_video: True면 동영상, False면 이미지 파일
-    fps: 이미지 소스면 None
-    """
-
-    width: int
-    height: int
-    is_video: bool
-    fps: float | None  # 이미지면 None
-
-
-@runtime_checkable
-class FrameSource(Protocol):
-    """단일 프레임 공급원 추상(테스트 치환용).
-
-    app 레이어는 이 Protocol에만 의존한다.
-    반환 배열: RGB HxWx3 uint8.
-    """
-
-    def probe(self) -> FrameMeta:
-        """소스 메타 정보를 반환한다."""
-        ...
-
-    def read_frame(self, index: int = 0) -> np.ndarray:
-        """RGB HxWx3 uint8 배열을 반환한다."""
-        ...
-
-    def read_frames(self, span: FrameSpan) -> list[np.ndarray]:
-        """FrameSpan 구간 프레임 시퀀스를 RGB HxWx3 uint8 리스트로 반환한다.
-
-        이미지 소스: [read_frame()] 단일 프레임 1개 리스트 반환 (LSP 준수).
-        비디오 소스: start PTS 시크 후 end까지 순차 디코드.
-        """
-        ...
 
 
 def open_source(path: str) -> FrameSource:

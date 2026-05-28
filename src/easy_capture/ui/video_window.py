@@ -516,7 +516,7 @@ class VideoMainWindow(QMainWindow):
 
     def _load_first_frame(self) -> None:
         """구간 첫 프레임만 추출해 캔버스에 표시한다(가벼움)."""
-        from easy_capture.infra.video_io import FrameSpan
+        from easy_capture.core.source.frame_source import FrameSpan
 
         start = self._span_start.value()
         span = FrameSpan(start=start, end=start + 1)
@@ -541,7 +541,7 @@ class VideoMainWindow(QMainWindow):
         WHY: _TrackWorker가 shot_detect 호출을 위해 FrameSpan을 필요로 하므로
              프레임과 함께 span을 반환한다([중요] 2 수정).
         """
-        from easy_capture.infra.video_io import FrameSpan
+        from easy_capture.core.source.frame_source import FrameSpan
 
         start = self._span_start.value()
         end = self._span_end.value()
