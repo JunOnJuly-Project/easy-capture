@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-28 (슬로우모션 Story 1·2 — core 타임리맵 + GIF per-frame duration 완료·main 머지, Story 3 진행 예정)
+> 최종 업데이트: 2026-05-28 (슬로우모션 Story 1·2·3 — 타임리맵+GIF+MP4 인코딩 완료·main 머지, Story 4 진행 예정)
 
 ---
 
@@ -47,7 +47,7 @@ python -m easy_capture                    # 시작 화면(모드 선택)
 ### 2-4. 동작 확인 (smoke test)
 
 ```bash
-.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 362개)
+.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 367개)
 ```
 
 GPU 비디오 추적 검증은 `poc/colab/` 노트북(Colab GPU).
@@ -73,7 +73,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`main` (전 슬라이스 + 슬로우모션 Story 1·2 머지 — 362 테스트 통과). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). 다음: Story 3(MP4 프레임 복제) = `feature/export/mp4-frame-replication`.
+`main` (전 슬라이스 + 슬로우모션 Story 1·2·3 머지 — 367 테스트 통과). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). 다음: Story 4(export 결합) = `feature/app/export-timeremap`.
 
 ### 완료 ✅
 
@@ -103,7 +103,9 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 1. **🎬 슬로우모션(타임리맵) 구현** (진행 중, 계획서 `docs/plans/video-speed-remap-plan.md`):
    - ✅ **ADR 0013 + Story 1**(`feature/timing/timeremap-core`): `core/timing/timeremap.py` 순수 로직 — `SpeedSegment`·`normalize_segments`·`PlaybackSchedule`(frame_indices·durations_ms tuple)·`build_playback_schedule`·`schedule_to_cfr_indices`·`clamp_durations_for_gif`. 테스트 53개(전체 355 통과). 코드 리뷰 [중요] 2 반영(CFR 잔여 가드·tuple화). segments=() 무회귀.
    - ✅ **Story 2**(`feature/export/gif-variable-duration`): `VideoExportConfig.segments` + `_encode_gif` 프레임별 duration(`build_playback_schedule`→`clamp_durations_for_gif` 연결, 10ms 클램프, loop=0 유지). 테스트 +7(전체 362). segments=() 무회귀. 리뷰 [중요] 0.
-   - ⏳ 다음: Story 3(MP4 프레임 복제, `feature/export/mp4-frame-replication`) → Story 4(export 결합 + 클램프 경고 표면화) → Story 5(UI 구간 테이블·미리보기 버튼) → Story 6(노트북). 각 `/develop --tdd`, main에서 분기.
+   - ✅ **Story 3**(`feature/export/mp4-frame-replication`): MP4 `_resolve_mp4_frames` — `schedule_to_cfr_indices`로 슬로우=프레임 복제·패스트=드롭(CFR). 테스트 +5(전체 367, ffmpeg 실인코딩). 단일 패스트 가드([중요1]) 실검증. segments=() 무회귀. 리뷰 [중요] 0.
+   - ⏳ 다음: Story 4(export 결합 — `VideoCaptureUseCase.export`에 segments 연결·output_indices↔schedule 2단계 인덱싱·클램프 경고 표면화, `feature/app/export-timeremap`) → Story 5(UI 구간 테이블·미리보기 버튼) → Story 6(노트북). 각 `/develop --tdd`, main에서 분기.
+   - 📌 백로그(리뷰 [제안]): Story 3 가드 테스트 주석 "1프레임"→"1~2프레임" 정정, GIF fallback `1000/12.0` → `_DEFAULT_FPS` 상수화(GIF/MP4 일관).
    - 잔여 디테일: 미리보기 프레임 스크럽(prev/next, Story 5), 저fps GIF 패스트 경고 문구, [중요1] CFR 단일 패스트 가드는 Story 3에서 실인코딩 검증.
 2. **🔴 비디오 Colab GPU 검증** (병행 가능): SAM2 video·Grounding DINO **실추론** 미검증. `poc/colab/easy_capture_app_verify.ipynb`로 ① 단일 샷 추적→크롭→GIF/MP4(추적·크롭은 사용자 검증 OK), ② 컷 섞인 클립 샷경계 재추적(재매칭 통과/미달, threshold 0.5 보정) 검증. PoC H1·H2·GPU fps → `poc/REPORT.md`. (이미지 SAM2+업스케일은 실모델 CPU 스모크 완료)
 3. **이미지 모드 GUI 수동 스모크** (선택): `python -m easy_capture` → 이미지 → 클릭 → 종횡비/크기 → (업스케일) 저장 실사용 확인. (실모델 코드 스모크는 완료 — API·centroid·업스케일 정합 확인됨)
