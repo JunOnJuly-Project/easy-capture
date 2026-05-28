@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from easy_capture.core.crop.crop import ASPECT_PRESETS
 from easy_capture.core.export.video_export import VideoExportConfig
+from easy_capture.core.tracking.gap_policy import GapPolicy
 from easy_capture.ui.frame_canvas import FrameCanvas
 from easy_capture.ui.sizing import (
     DEFAULT_CROP_RATIO,
@@ -47,6 +48,15 @@ _ASPECT_ITEMS: list[tuple[str, str | None]] = [
 ]
 
 # 기본 smooth_window
+# occlusion 갭 정책 콤보 항목: (표시 라벨, GapPolicy)
+# WHY: 추적이 끊긴 프레임 처리 방식을 사용자가 고른다. 백엔드 build_output_indices가
+#      이미 세 정책을 지원하므로 UI는 선택값을 export config로 전달하기만 한다.
+_GAP_POLICY_ITEMS: list[tuple[str, GapPolicy]] = [
+    ("배경 유지", GapPolicy.BACKGROUND),
+    ("컷(갭 제외)", GapPolicy.CUT),
+    ("정지(갭 홀드)", GapPolicy.FREEZE),
+]
+
 _DEFAULT_SMOOTH = 5
 
 # 기본 출력 FPS
@@ -212,6 +222,7 @@ class VideoMainWindow(QMainWindow):
         self._build_aspect_combo(tb)
         self._build_size_slider(tb)
         self._build_smooth_spinbox(tb)
+        self._build_gap_combo(tb)
         self._build_track_save_buttons(tb)
 
     def _build_span_controls(self, tb: QToolBar) -> None:
@@ -241,6 +252,18 @@ class VideoMainWindow(QMainWindow):
         self._aspect_combo.setEnabled(False)
         self._aspect_combo.currentIndexChanged.connect(self._on_aspect_changed)
         tb.addWidget(self._aspect_combo)
+
+    def _build_gap_combo(self, tb: QToolBar) -> None:
+        """occlusion 갭 정책 선택 콤보박스를 툴바에 추가한다.
+
+        export 시점에만 값을 읽으므로 시그널 연결은 불필요(재추적·재계산 무관).
+        """
+        tb.addWidget(QLabel("  갭:"))
+        self._gap_combo = QComboBox()
+        for label, _ in _GAP_POLICY_ITEMS:
+            self._gap_combo.addItem(label)
+        self._gap_combo.setEnabled(False)
+        tb.addWidget(self._gap_combo)
 
     def _build_size_slider(self, tb: QToolBar) -> None:
         """크기 슬라이더를 툴바에 추가한다."""
@@ -393,6 +416,7 @@ class VideoMainWindow(QMainWindow):
         self._smooth_spin.setEnabled(True)
         self._fmt_combo.setEnabled(True)
         self._fps_spin.setEnabled(True)
+        self._gap_combo.setEnabled(True)
         self._save_btn.setEnabled(True)
 
         status = _build_track_status(result)
@@ -440,7 +464,8 @@ class VideoMainWindow(QMainWindow):
             return
 
         fps = float(self._fps_spin.value())
-        config = VideoExportConfig(fmt=fmt, fps=fps)
+        gap_policy = _GAP_POLICY_ITEMS[self._gap_combo.currentIndex()][1]
+        config = VideoExportConfig(fmt=fmt, fps=fps, gap_policy=gap_policy)
         self._save_btn.setEnabled(False)
         self._set_status("저장 중…")
         self._export_worker = _ExportWorker(
