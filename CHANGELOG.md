@@ -6,6 +6,13 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
 
 ## [미출시]
 
+### 수정
+- **비디오 크롭 잘림·흔들림·GIF 재생속도** (`feature/video/crop-tuning`, GPU 실검증 피드백)
+  - 크롭 잘림: `compute_boxes`가 고정 `box_size` 대신 구간 내 마스크 bbox 최대×`subject_padding`으로 크기를 자동 산출. `_expand_to_aspect`로 종횡비를 확대 방향 적용 → 1:1 등에서도 피사체가 안 잘림.
+  - 위치 흔들림: 크롭 중심을 centroid(무게중심)→bbox 중심(`_bbox_center`)으로 변경(자세 변화에 안정). `smooth_window` 노출.
+  - GIF 재생속도: `_encode_gif` duration 초→밀리초(imageio 2.28+ 단위 변경). 이전엔 무효화돼 ≈10fps로 느렸음. `GIF_FPS`로 조절 가능.
+  - 앱 검증 노트북(`poc/colab/easy_capture_app_verify.ipynb`) 설치 셀 수정(editable→sys.path, Colab `ModuleNotFoundError` 해결) + 조절 파라미터 노출. 테스트 300개(신규 16).
+
 ### 추가
 - **비디오 occlusion gap 정책 UI** (`feature/video/gap-policy-ui`)
   - 추적이 끊긴(occlusion) 프레임 처리 정책을 UI에서 선택: 배경 유지(BACKGROUND)/컷(CUT)/정지(FREEZE).
