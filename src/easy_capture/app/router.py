@@ -1,6 +1,6 @@
 """모드 선택 → 메인 윈도우 라우팅 + 의존성 조립 루트(composition root).
 
-AppRouter가 구체 의존성(Sam2ImageBackend, open_source)을 조립해
+AppRouter가 구체 의존성(Sam2ImageBackend, open_source, Swin2srUpscaleBackend)을 조립해
 ImageCaptureUseCase와 ImageMainWindow에 주입한다.
 UI·유스케이스·infra를 처음으로 연결하는 단일 지점.
 """
@@ -48,26 +48,32 @@ class AppRouter:
 
     def _launch_image_mode(self) -> None:
         """이미지 모드 의존성을 조립하고 메인 윈도우를 표시한다."""
+        from easy_capture.infra.device import UPSCALE_MODELS, detect_device
         from easy_capture.ui.main_window import ImageMainWindow
 
-        usecase_factory = self._build_usecase_factory()
-        self._main_window = ImageMainWindow(usecase_factory)
+        device = detect_device()
+        usecase_factory = self._build_usecase_factory(device)
+        upscaler_factory = self._build_upscaler_factory(device)
+        self._main_window = ImageMainWindow(
+            usecase_factory,
+            upscaler_factory=upscaler_factory,
+            upscale_catalog=UPSCALE_MODELS,
+        )
         self._main_window.show()
         if self._mode_window:
             self._mode_window.close()
 
-    def _build_usecase_factory(self):
+    def _build_usecase_factory(self, device: str):
         """파일 경로를 받아 ImageCaptureUseCase를 생성하는 팩토리를 반환한다.
 
         WHY: 파일 경로가 결정된 후에야 FrameSource를 만들 수 있으므로
              클로저로 팩토리를 반환한다. 백엔드는 한 번만 생성해 재사용한다.
         """
         from easy_capture.app.image_capture import ImageCaptureUseCase
-        from easy_capture.infra.device import detect_device, select_sam2_repo
+        from easy_capture.infra.device import select_sam2_repo
         from easy_capture.infra.sam2_image_backend import Sam2ImageBackend
         from easy_capture.infra.video_io import open_source
 
-        device = detect_device()
         repo = select_sam2_repo(device)
         # 백엔드는 지연 로드 — 생성자에서 모델 로드 안 함(ADR 0007)
         backend = Sam2ImageBackend(repo=repo, device=device)
@@ -77,3 +83,17 @@ class AppRouter:
             return ImageCaptureUseCase(source=source, backend=backend)
 
         return factory
+
+    def _build_upscaler_factory(self, device: str):
+        """UpscaleModel → Swin2srUpscaleBackend 생성 팩토리를 반환한다.
+
+        WHY: main_window는 transformers/torch를 직접 import하지 않는다(DIP).
+             router(composition root)가 구체 백엔드 생성 책임을 가진다.
+             지연 로드 백엔드이므로 생성 자체는 가볍다.
+        """
+        from easy_capture.infra.swin2sr_upscale_backend import Swin2srUpscaleBackend
+
+        def make(model):  # model: UpscaleModel
+            return Swin2srUpscaleBackend(model.repo, device, model.scale)
+
+        return make
