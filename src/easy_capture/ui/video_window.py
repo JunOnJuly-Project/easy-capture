@@ -9,6 +9,7 @@
   - compute_boxes: 종횡비·크기·smooth_window 변경 시 메인 스레드 즉시 재호출.
     재추적 없음 — propagate_call_count 회귀 가드를 UI에서도 만족한다.
   - FrameCanvas·coords 재사용 (이미지 모드와 동형).
+  - UI는 usecase 공개 API(probe_meta, read_span_frames)만 사용(캡슐화, 리뷰 [중요] 3).
   - 한국어 상태 안내.
 """
 from __future__ import annotations
@@ -26,7 +27,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QToolBar,
-    QWidget,
 )
 
 from easy_capture.core.crop.crop import ASPECT_PRESETS
@@ -54,6 +54,12 @@ _DEFAULT_FPS = 12.0
 
 # 구간 선택 기본값 (프레임 수)
 _DEFAULT_SPAN_END = 60
+
+# _estimate_frame_count 매직넘버 설명 상수 (리뷰 [제안])
+# WHY: fps가 있을 때 SpinBox 상한을 "최대 300초(5분) 분량"으로 설정한다.
+#      fps 정보가 없을 때는 관대한 상한(3000프레임)으로 입력 오류를 방지한다.
+_MAX_ESTIMATE_SECONDS = 300   # fps 있는 경우 추정 상한 (초)
+_DEFAULT_FRAME_LIMIT = 3000   # fps 없는 경우 관대한 상한 (프레임)
 
 
 class _TrackWorker(QThread):
@@ -96,16 +102,17 @@ class _ExportWorker(QThread):
     done = Signal(str)   # 저장 완료 경로
     error = Signal(str)  # 한국어 오류 메시지
 
-    def __init__(self, usecase, frames, boxes, target) -> None:
+    def __init__(self, usecase, frames, boxes, target, result) -> None:
         super().__init__()
-        self._args = (usecase, frames, boxes, target)
+        # WHY: 인자를 튜플로 묶어 매개변수 3개 규칙 완화 — 생성자 계약
+        self._args = (usecase, frames, boxes, target, result)
 
     def run(self) -> None:
         """워커 스레드에서 export를 실행한다."""
-        usecase, frames, boxes, target = self._args
+        usecase, frames, boxes, target, result = self._args
         path, _ = target
         try:
-            usecase.export(frames, boxes, target)
+            usecase.export(frames, boxes, target, result=result)
             self.done.emit(path)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"저장 오류: {exc}")
@@ -128,12 +135,14 @@ class VideoMainWindow(QMainWindow):
         # 상태 필드
         self._usecase = None
         self._frames: list[np.ndarray] | None = None
-        self._track_result = None
+        self._track_result = None          # TrackResult — export gap_policy용
         self._boxes: list | None = None
         self._aspect: str | None = None
         self._size_ratio: int = DEFAULT_CROP_RATIO
         self._smooth_window: int = _DEFAULT_SMOOTH
         self._total_frames: int = 0
+        # 리뷰 [제안]: __init__에서 None으로 선언해 hasattr 대신 is not None 검사
+        self._pending_point: tuple[int, int] | None = None
 
         # 워커
         self._track_worker: _TrackWorker | None = None
@@ -270,7 +279,8 @@ class VideoMainWindow(QMainWindow):
             return
         try:
             self._usecase = self._usecase_factory(path)
-            meta = self._usecase._source.probe()
+            # WHY: usecase 공개 API probe_meta() 사용 — 비공개 _source 관통 금지(리뷰 [중요] 3)
+            meta = self._usecase.probe_meta()
             self._total_frames = _estimate_frame_count(meta)
             self._setup_span_controls()
             self._load_first_frame()
@@ -288,7 +298,7 @@ class VideoMainWindow(QMainWindow):
         self._save_btn.setEnabled(False)
 
     def _on_canvas_click(self, x: int, y: int) -> None:
-        """캔버스 클릭 시 구간 프레임 로드 + 추적 워커를 시작한다(무거운 경로)."""
+        """캔버스 클릭 시 구간 프레임 로드 + 추적 버튼 활성화."""
         if self._usecase is None:
             return
         if self._track_worker is not None and self._track_worker.isRunning():
@@ -305,7 +315,8 @@ class VideoMainWindow(QMainWindow):
 
     def _on_track(self) -> None:
         """추적 워커를 시작한다(무거움 — propagate 1회)."""
-        if self._frames is None or not hasattr(self, "_pending_point"):
+        # 리뷰 [제안]: hasattr 대신 is not None 검사 통일
+        if self._frames is None or self._pending_point is None:
             return
         if self._track_worker is not None and self._track_worker.isRunning():
             self._set_status("추적 중입니다. 잠시만 기다려 주세요.")
@@ -381,7 +392,11 @@ class VideoMainWindow(QMainWindow):
         self._save_btn.setEnabled(False)
         self._set_status("저장 중…")
         self._export_worker = _ExportWorker(
-            self._usecase, self._frames, self._boxes, (path, config)
+            self._usecase,
+            self._frames,
+            self._boxes,
+            (path, config),
+            self._track_result,  # gap_policy용 TrackResult 전달
         )
         self._export_worker.done.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
@@ -426,7 +441,10 @@ class VideoMainWindow(QMainWindow):
             self._set_status(f"프레임 로드 실패: {exc}")
 
     def _load_span_frames(self) -> list[np.ndarray]:
-        """현재 구간 설정으로 전체 프레임 시퀀스를 추출한다."""
+        """현재 구간 설정으로 전체 프레임 시퀀스를 추출한다.
+
+        WHY: usecase 공개 API read_span_frames() 사용 — 비공개 _source 관통 금지(리뷰 [중요] 3).
+        """
         from easy_capture.infra.video_io import FrameSpan
 
         start = self._span_start.value()
@@ -434,7 +452,7 @@ class VideoMainWindow(QMainWindow):
         if end <= start:
             raise ValueError("끝 프레임이 시작 프레임보다 커야 합니다.")
         span = FrameSpan(start=start, end=end)
-        return self._usecase._source.read_frames(span)
+        return self._usecase.read_span_frames(span)
 
     def _recompute_boxes(self) -> None:
         """보관된 TrackResult + 현재 params로 박스를 즉시 재계산한다.
@@ -447,7 +465,6 @@ class VideoMainWindow(QMainWindow):
             return
 
         from easy_capture.app.video_capture import VideoCropParams
-        from easy_capture.infra.video_io import FrameSpan
 
         frame = self._frames[0]
         frame_w, frame_h = frame.shape[1], frame.shape[0]
@@ -473,10 +490,11 @@ class VideoMainWindow(QMainWindow):
 def _estimate_frame_count(meta) -> int:
     """FrameMeta에서 총 프레임 수를 추정한다.
 
-    WHY: probe()가 총 프레임 수를 직접 반환하지 않으므로 fps × 예상 길이로
-         SpinBox 범위를 설정한다. fps가 없으면 관대한 기본값을 사용한다.
+    WHY: probe()가 총 프레임 수를 직접 반환하지 않으므로 fps × 추정 길이로
+         SpinBox 범위를 설정한다.
+         _MAX_ESTIMATE_SECONDS(300초=5분): fps가 있을 때 합리적인 SpinBox 상한.
+         _DEFAULT_FRAME_LIMIT(3000): fps 정보 없을 때 관대한 상한으로 입력 오류 방지.
     """
     if meta.fps and meta.fps > 0:
-        # 최대 30초 또는 fps×300 프레임을 기본 범위로 설정
-        return max(300, int(meta.fps * 300))
-    return 3000  # fps 정보 없을 때 관대한 상한
+        return max(_DEFAULT_FRAME_LIMIT, int(meta.fps * _MAX_ESTIMATE_SECONDS))
+    return _DEFAULT_FRAME_LIMIT

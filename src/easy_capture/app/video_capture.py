@@ -4,13 +4,17 @@
   load_first_frame → 구간 첫 프레임만 추출 (모델 로드/전파 안 함)
   track           → init_session → add_click → propagate → TrackResult (무거움)
   compute_boxes   → TrackResult.centroids → smooth → 프레임별 make_crop_box (순수·가벼움)
-  export          → gap_policy → crop_frames → encode_frames (GIF/MP4)
+  export          → gap_policy(centroids 기반) → crop_frames → encode_frames (GIF/MP4)
 
 설계 원칙(계획서 §3-2):
   - track: 무거움. propagate는 구간당 딱 1회만 워커에서 호출한다.
   - compute_boxes: 순수·가벼움. backend 절대 미호출.
     종횡비/크기 변경 시 재추적 없이 즉시 재호출.
   - 고정 box size: 전 프레임 동일 W×H (GIF/MP4 인코딩 가능 불변식).
+  - export valid_flags: TrackResult.centroids(None 여부)에서 도출.
+    WHY: compute_boxes는 occlusion 프레임도 fallback 박스를 항상 채우므로
+         box 리스트에서 None을 찾는 방식은 항상 전부 True가 된다(리뷰 [중요] 2).
+         centroid None 여부만이 실제 추적 실패(occlusion) 여부를 정확히 나타낸다.
 """
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ from easy_capture.core.segmentation.video_backend import (
 from easy_capture.core.tracking.gap_policy import build_output_indices
 from easy_capture.infra.video_io import FrameSource, FrameSpan
 
-# 타입 힌트 전용 import — 런타임 의존성 없음
+# 타입 힌트 전용 alias
 CropBox = tuple[int, int, int, int]
 
 
@@ -87,6 +91,22 @@ class VideoCaptureUseCase:
         """프레임 공급원·비디오 세그 백엔드 주입."""
         self._source = source
         self._backend = backend
+
+    def probe_meta(self):
+        """소스 메타 정보를 반환한다(UI가 공개 API만 사용하도록 위임).
+
+        WHY: UI가 self._usecase._source.probe()처럼 비공개 필드를 관통하는
+             대신 이 메서드를 호출해 캡슐화를 지킨다(리뷰 [중요] 3).
+        """
+        return self._source.probe()
+
+    def read_span_frames(self, span: FrameSpan) -> list[np.ndarray]:
+        """구간 프레임 시퀀스를 추출해 반환한다(UI 공개 API).
+
+        WHY: UI가 self._usecase._source.read_frames(span)처럼 비공개 필드를
+             관통하는 대신 이 메서드를 호출해 캡슐화를 지킨다(리뷰 [중요] 3).
+        """
+        return self._source.read_frames(span)
 
     def load_first_frame(self, span: FrameSpan) -> np.ndarray:
         """구간 첫 프레임만 추출한다(모델 로드·전파 안 함, 가벼움).
@@ -156,16 +176,24 @@ class VideoCaptureUseCase:
         frames: list[np.ndarray],
         boxes: list[CropBox],
         target: tuple[str, VideoExportConfig],
+        result: TrackResult | None = None,
     ) -> None:
         """gap_policy → 프레임 선택 → crop_frames → encode_frames.
+
+        valid_flags는 TrackResult.centroids(None 여부)에서 도출한다.
+        WHY: compute_boxes는 occlusion 프레임도 fallback 박스를 항상 채우므로
+             box 리스트에서 None을 찾으면 항상 전부 True가 된다. centroid None
+             여부만이 실제 추적 실패 구간을 정확히 나타낸다(리뷰 [중요] 2).
+             result=None이면 모든 프레임 유효(하위호환 폴백).
 
         Args:
             frames: 원본 구간 프레임 리스트.
             boxes: compute_boxes 결과 박스 리스트.
             target: (출력 경로, VideoExportConfig) 튜플.
+            result: track()이 반환한 TrackResult (gap_policy 적용용).
         """
         path, config = target
-        valid_flags = [box is not None for box in boxes]
+        valid_flags = _valid_flags_from_result(result, len(frames))
         indices = build_output_indices(valid_flags, config.gap_policy)
         selected_frames = [frames[i] for i in indices]
         selected_boxes = [boxes[i] for i in indices]
@@ -176,6 +204,23 @@ class VideoCaptureUseCase:
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
+
+def _valid_flags_from_result(
+    result: TrackResult | None, n_frames: int
+) -> list[bool]:
+    """TrackResult.centroids에서 valid_flags 리스트를 도출한다.
+
+    centroid가 None이 아닌 프레임만 True(추적 성공).
+    result가 None이면 전부 True 반환(하위호환 폴백).
+
+    WHY: compute_boxes는 occlusion 프레임에도 fallback 박스를 채워 box가
+         절대 None이 되지 않는다. 따라서 box 존재 여부로는 gap을 감지할 수 없고,
+         centroid None 여부만이 실제 occlusion 구간을 정확히 표현한다.
+    """
+    if result is None:
+        return [True] * n_frames
+    return [c is not None for c in result.centroids]
+
 
 def _raise_if_all_empty(centroids: list) -> None:
     """전 프레임 centroid가 None이면 EmptyTrackError를 발생시킨다.

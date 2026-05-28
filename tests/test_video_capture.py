@@ -742,3 +742,152 @@ class TestGapPolicyIntegration:
         assert output_indices == expected, (
             f"CUT 정책 출력 인덱스 불일치: {output_indices} vs {expected}"
         )
+
+
+# ---------------------------------------------------------------------------
+# export() valid_flags 경로 직접 검증 (리뷰 [중요] 2 회귀 가드)
+# ---------------------------------------------------------------------------
+
+def _make_distinct_frames(n: int) -> list[np.ndarray]:
+    """각 프레임이 서로 다른 픽셀값을 갖는 RGB 배열 리스트를 반환한다.
+
+    WHY: FakeFrameSource.read_frame은 index를 무시해 동일 프레임을 반환한다.
+         GIF writer가 동일 프레임을 1장으로 최적화하면 mimread 결과가 달라지므로,
+         export 테스트에서는 프레임별로 다른 내용을 직접 생성해 사용한다.
+    """
+    frames = []
+    for i in range(n):
+        arr = np.zeros((FAKE_FRAME_H, FAKE_FRAME_W, 3), dtype=np.uint8)
+        # R채널: 프레임 인덱스 기반으로 명확히 구분 (0~250 범위 내)
+        arr[:, :, 0] = (i * 25) % 256
+        arr[:, :, 1] = 100
+        arr[:, :, 2] = 128
+        frames.append(arr)
+    return frames
+
+
+class TestExportGapPolicy:
+    """export()가 TrackResult.centroids에서 valid_flags를 올바르게 도출하는지 검증.
+
+    WHY: compute_boxes는 occlusion 프레임에도 fallback 박스를 채우므로
+         box 리스트에서 None을 찾는 방식은 항상 전부 True → gap_policy가 무력화된다.
+         export(result=...)를 통해 centroids 기반 valid_flags가 실제 인코딩에
+         반영되는지 라운드트립으로 직접 검증한다(리뷰 [중요] 2).
+
+    주의: FakeFrameSource는 동일 프레임을 반환하므로 GIF 최적화가 1프레임으로
+         압축된다. 이 테스트는 _make_distinct_frames로 프레임별 다른 내용을 사용한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_export_CUT_정책_valid_flags가_centroid_기반이다(self):
+        """Given: empty_after=EMPTY_AFTER_IDX, CUT 정책
+        When:  export 내부 _valid_flags_from_result 결과
+        Then:  valid_flags에서 CUT 인덱스 수 == EMPTY_AFTER_IDX
+
+        WHY: valid_flags가 box 여부(항상 True)가 아닌 centroid 여부(None=occlusion)
+             에서 도출돼야 CUT 정책이 실제로 갭 프레임을 잘라낸다.
+             이 테스트가 깨지면 [중요] 2 버그가 재발한 것이다.
+             GIF 최적화 우회를 위해 인코딩 대신 valid_flags → indices 경로를 직접 검증.
+        """
+        from easy_capture.app.video_capture import _valid_flags_from_result
+        from easy_capture.core.tracking.gap_policy import GapPolicy, build_output_indices
+
+        usecase, _ = _make_usecase(empty_after=EMPTY_AFTER_IDX)
+        frames = _make_distinct_frames(FRAME_COUNT)
+        result = usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        # [핵심] valid_flags가 centroid 기반인지 확인
+        valid_flags = _valid_flags_from_result(result, FRAME_COUNT)
+        cut_indices = build_output_indices(valid_flags, GapPolicy.CUT)
+
+        assert len(cut_indices) == EMPTY_AFTER_IDX, (
+            f"CUT valid_flags 인덱스 수 불일치: {len(cut_indices)} vs {EMPTY_AFTER_IDX}. "
+            "valid_flags가 centroid 기반이 아닌 경우 전 프레임이 포함된다."
+        )
+        # occlusion 프레임(7,8,9)이 제외됐는지 확인
+        assert EMPTY_AFTER_IDX not in cut_indices, (
+            f"occlusion 프레임({EMPTY_AFTER_IDX})이 CUT 출력에 포함됨"
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_export_CUT_정책_GIF_라운드트립_프레임수(self, tmp_path):
+        """Given: 각 프레임이 다른 내용을 가진 10개 프레임, empty_after=7, CUT
+        When:  export(result=result, config=CUT) → GIF 인코딩
+        Then:  GIF 프레임 수 == EMPTY_AFTER_IDX (7)
+
+        WHY: _make_distinct_frames로 GIF 최적화(동일 프레임 병합)를 방지하고
+             실제 인코딩된 프레임 수로 CUT 정책 효과를 확인한다.
+        """
+        import imageio
+
+        from easy_capture.core.export.video_export import VideoExportConfig
+        from easy_capture.core.tracking.gap_policy import GapPolicy
+
+        usecase, _ = _make_usecase(empty_after=EMPTY_AFTER_IDX)
+        frames = _make_distinct_frames(FRAME_COUNT)
+        result = usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        params = VideoCropParams(
+            box_size=(BOX_W, BOX_H),
+            aspect=None,
+            smooth_window=SMOOTH_WINDOW,
+        )
+        frame_size = (FAKE_FRAME_W, FAKE_FRAME_H)
+        boxes = usecase.compute_boxes(result, params, frame_size)
+
+        out_path = str(tmp_path / "cut_test.gif")
+        config = VideoExportConfig(fmt="gif", fps=12.0, gap_policy=GapPolicy.CUT)
+        usecase.export(frames, boxes, (out_path, config), result=result)
+
+        reloaded = imageio.mimread(out_path)
+        assert len(reloaded) == EMPTY_AFTER_IDX, (
+            f"CUT 정책 GIF 프레임 수 불일치: {len(reloaded)} vs {EMPTY_AFTER_IDX}. "
+            "valid_flags가 centroid 기반이 아닌 경우 전 프레임이 출력된다."
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_export_FREEZE_정책_valid_flags가_centroid_기반이다(self):
+        """Given: empty_after=EMPTY_AFTER_IDX, FREEZE 정책
+        When:  _valid_flags_from_result + build_output_indices(FREEZE)
+        Then:  FREEZE 인덱스 수 == FRAME_COUNT (갭은 직전으로 채움)
+
+        WHY: FREEZE 정책은 갭을 마지막 유효 프레임으로 대체한다.
+             valid_flags가 centroid 기반이어야 갭 구간을 정확히 감지한다.
+        """
+        from easy_capture.app.video_capture import _valid_flags_from_result
+        from easy_capture.core.tracking.gap_policy import GapPolicy, build_output_indices
+
+        usecase, _ = _make_usecase(empty_after=EMPTY_AFTER_IDX)
+        frames = _make_distinct_frames(FRAME_COUNT)
+        result = usecase.track(frames, (CLICK_X, CLICK_Y))
+
+        valid_flags = _valid_flags_from_result(result, FRAME_COUNT)
+        freeze_indices = build_output_indices(valid_flags, GapPolicy.FREEZE)
+
+        assert len(freeze_indices) == FRAME_COUNT, (
+            f"FREEZE 인덱스 수 불일치: {len(freeze_indices)} vs {FRAME_COUNT}."
+        )
+        # 마지막 유효 인덱스(6)가 갭 구간에 반복됐는지 확인
+        last_valid = EMPTY_AFTER_IDX - 1  # 6
+        for idx in range(EMPTY_AFTER_IDX, FRAME_COUNT):
+            assert freeze_indices[idx] == last_valid, (
+                f"FREEZE 인덱스[{idx}]={freeze_indices[idx]}, 기대={last_valid}"
+            )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    def test_export_result_None_이면_전_프레임_유효_처리된다(self):
+        """Given: result=None (하위호환 폴백), BACKGROUND 정책
+        When:  _valid_flags_from_result(None, n)
+        Then:  valid_flags 전부 True, 인덱스 수 == n
+
+        WHY: result=None은 하위호환 경로. 전부 유효(valid=True)로 처리한다.
+        """
+        from easy_capture.app.video_capture import _valid_flags_from_result
+        from easy_capture.core.tracking.gap_policy import GapPolicy, build_output_indices
+
+        valid_flags = _valid_flags_from_result(None, FRAME_COUNT)
+        assert all(valid_flags), "result=None이면 전부 True여야 한다"
+        indices = build_output_indices(valid_flags, GapPolicy.BACKGROUND)
+        assert len(indices) == FRAME_COUNT, (
+            f"result=None BACKGROUND 인덱스 수 불일치: {len(indices)} vs {FRAME_COUNT}"
+        )
