@@ -7,6 +7,12 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
 ## [미출시]
 
 ### 추가
+- **이미지 모드 크롭 UX 확장** (`feature/image/crop-ux`)
+  - 종횡비 프리셋 선택(자유/1:1/9:16/16:9) + 크롭 크기 슬라이더 + 마스크 오버레이 표시.
+  - `ImageCaptureUseCase`: `segment`(SAM2 1회·무거움)/`compute_box`(순수·가벼움) 2단계 분리 → 종횡비·크기 조정 시 재세그 없이 즉시 갱신. `SegmentResult`·`BoxParams` 데이터클래스.
+  - `ui/sizing`: `crop_ratio_to_size` 순수 함수 + 슬라이더 상수.
+  - `frame_canvas.mask_to_rgba`: numpy 벡터화 오버레이(픽셀 이중루프 제거).
+  - 테스트 137개 통과(재세그 카운터 회귀 가드 포함). 코드 리뷰 [중요] 2건 반영.
 - **이미지(짤) 모드 첫 수직 슬라이스 — end-to-end happy path 구현** (`feature/image/capture-slice`)
   - `core/export`: `crop_array` / `save_image` (Pillow, PNG/JPG, sRGB 태깅). `ExportConfig` 데이터클래스.
   - `infra/video_io`: `FrameSource` Protocol · `FrameMeta` · `open_source` 팩토리. 이미지=Pillow, 영상=PyAV 첫프레임(PTS 시크, RGB BT.709 정규화).

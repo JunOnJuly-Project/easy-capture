@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-28 (이미지 모드 첫 수직 슬라이스 완료)
+> 최종 업데이트: 2026-05-28 (이미지 모드 크롭 UX 확장 완료)
 
 ---
 
@@ -72,7 +72,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`feature/image/capture-slice` (이미지 모드 첫 수직 슬라이스 완료, 다음 슬라이스 대기)
+`feature/image/crop-ux` (이미지 모드 크롭 UX 확장 완료, 다음 슬라이스 대기)
 
 ### 완료 ✅
 
@@ -86,15 +86,16 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 | 조사 | **CPU 개발 전략 확정**(ADR 0007): 이중 경로 — 이미지=CPU, 비디오=클라우드 GPU | ✅ |
 | 구현 | **스캐폴딩**(`feature/app/scaffolding`): 패키지 구조(src/easy_capture, core/infra/ui), core 순수 로직(crop·gap_policy·rematch·device·backend IF), PySide6 모드선택 셸, **테스트 20개 통과** | ✅ |
 | 구현 | **이미지 모드 첫 수직 슬라이스**(`feature/image/capture-slice`): end-to-end happy path — 파일→프레임→클릭→SAM2(CPU)→크롭→PNG/JPG. 신규 모듈: `core/export`(crop_array/save_image, Pillow), `infra/video_io`(FrameSource Protocol·FrameMeta·open_source, 이미지=Pillow·영상=PyAV 첫프레임), `infra/sam2_image_backend`(Sam2ImageBackend, transformers 5.9.0 Sam2Model/Sam2Processor, 지연 로드, CPU), `app/image_capture`(ImageCaptureUseCase·CropRequest·EmptyMaskError), `app/router`(AppRouter 조립 루트), `ui/coords`(좌표 변환 순수함수), `ui/frame_canvas`, `ui/main_window`(워커 스레드 비블로킹). **테스트 71개 통과**(기존 20 포함). ADR 0008(app 유스케이스 레이어) 추가. 코드 리뷰 [중요] 4건 전원 반영. | ✅ |
+| 구현 | **이미지 모드 크롭 UX 확장**(`feature/image/crop-ux`): 종횡비 프리셋 UI(자유/1:1/9:16/16:9) + 크롭 크기 슬라이더 + 마스크 오버레이 표시. **핵심: 세그(무거움)/박스계산(가벼움) 분리** — `ImageCaptureUseCase.segment`(SAM2 1회, 워커)/`compute_box`(순수, 재세그 없음), `SegmentResult`·`BoxParams`. `ui/sizing`(crop_ratio_to_size), `frame_canvas.mask_to_rgba`(numpy 벡터화, 픽셀 루프 제거). **테스트 137개 통과**(재세그 카운터 회귀 가드 포함). 코드 리뷰 [중요] 2건 반영. | ✅ |
 
 ### 🔴 블로커
 - **GPU(CUDA) 사실상 필수**: PoC 실측상 SAM2 추적이 **CPU 에서 ≈0.10 fps**(프레임당 ~10초, 6초 클립에 ~14분). 현재 개발 PC 는 CPU 전용 → **실영상 추적·재추적 검증과 실사용에 GPU 환경 필요**. 하드웨어/클라우드 방향 결정 대기.
 
 ### 미완료 (다음 작업 순서) ⏳
 1. **SAM2 실모델 CPU 수동 스모크**: 위 "2-4 동작 확인" 절차에 따라 `python -m easy_capture` 실행 → 이미지 파일 열기 → 클릭 → 모델 다운로드/추론 → PNG 저장 전 구간 직접 확인.
-2. **이미지 모드 확장**: 종횡비 프리셋 UI(1:1/9:16/16:9 선택 버튼), 마스크 오버레이 연결(현재 `set_overlay` 미연결, 클릭 후 시각 피드백 없음), 사용자 크롭 크기 조정 슬라이더, 업스케일(SwinIR).
+2. **이미지 모드 확장 — 업스케일**: 종횡비 UI·마스크 오버레이·크롭 크기 조정은 완료(crop-ux). 남은 것은 업스케일(`core/upscale`, 기본 SwinIR) + export 파이프라인 연결. CPU 성능·모델 로드 검증 필요.
 3. **비디오 모드 슬라이스 (GPU)**: SAM2 video 백엔드 + tracking + 샷경계 재추적 + GIF/MP4 export. 로컬 검증은 `poc/colab/easy_capture_gpu_poc.ipynb`(Colab GPU). PoC H1 추적 유지율(AC-01 ≥80%)·H2 컷 재매칭(AC-03 ≥70%)·GPU fps(AC-06) 측정 → `poc/REPORT.md` 미검증 항목 채우기.
-4. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice` → main PR/머지.
+4. (정리) `feature/poc-core`·`feature/app/scaffolding`·`feature/image/capture-slice`·`feature/image/crop-ux` → main PR/머지.
 
 ### PoC 핵심 결과 (요약)
 - SAM2(이미지+비디오)·Grounding DINO 는 **transformers 5.9.0 만으로** 사용 가능(별도 `sam2` 패키지 불필요).
@@ -110,14 +111,14 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 - [ ] EdgeTAM(CPU 비디오 추적 후보)·경량 백엔드는 v1.1 평가
 - [ ] **[GPU 블로커] 비디오 모드**: SAM2 추적이 CPU 에서 ≈0.10 fps — GPU 환경(Colab 등) 없이 비디오 슬라이스 진행 불가. 하드웨어/클라우드 방향 결정 대기.
 
-**리뷰 제안 백로그** (이미지 모드 슬라이스 코드 리뷰 [제안] 7건):
-- `infra/video_io`: fps 산출에 `average_rate` 사용 — VFR 영상에서 부정확할 수 있음 (다음 슬라이스에서 `r_frame_rate` 폴백 추가 검토)
-- `infra/sam2_image_backend`: `_ensure_loaded()` 스레드 락 미적용 — 현재는 UI 워커 단일 스레드로 가드되나, 다중 워커 확장 시 경합 위험
-- `ui/frame_canvas`: 마스크 오버레이 픽셀 이중루프 — numpy 벡터화 또는 Qt alpha blend로 교체 시 성능 향상
-- `ui/frame_canvas`: `set_overlay` 미연결 — 클릭 후 마스크 시각 피드백 없음 (이미지 모드 확장 슬라이스에서 연결 예정)
-- `ui/main_window`: `box_size` 매직넘버 — 설명적 상수명(`DEFAULT_CROP_BOX_SIZE`) 으로 추출 예정
-- `tests/`: 일부 테스트 독스트링에 "TDD Red" 단계 메모 잔존 — 정리 필요
-- `tests/fixtures/fakes.py`: `_make_rect_mask` 매개변수 5개 — dataclass 로 묶기 검토
+**리뷰 제안 백로그**:
+- [해소] `ui/frame_canvas` 오버레이 픽셀 이중루프 → numpy 벡터화(`mask_to_rgba`) 완료 (crop-ux)
+- [해소] `ui/frame_canvas` `set_overlay` 미연결 → 클릭 후 오버레이 표시 연결 완료 (crop-ux)
+- [해소] `ui/main_window` `box_size` 매직넘버 → 슬라이더/`sizing` 상수로 대체 완료 (crop-ux)
+- [해소] `tests/` "TDD Red" 잔존 주석 정리 완료 (crop-ux)
+- [ ] `infra/video_io`: fps 산출 `average_rate` — VFR 부정확, `r_frame_rate` 폴백 검토(비디오 모드 슬라이스에서)
+- [ ] `infra/sam2_image_backend`: `_ensure_loaded()` 스레드 락 미적용 — 다중 워커 확장 시 경합 위험
+- [ ] `tests/fixtures/fakes.py`: `_make_rect_mask` 매개변수 5개 — dataclass 로 묶기 검토
 
 ---
 
