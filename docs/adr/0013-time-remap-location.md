@@ -1,6 +1,6 @@
 # ADR 0013 — 타임리맵 순수 로직 위치 및 PlaybackSchedule 이중 표현
 
-- 상태: 채택
+- 상태: 채택 (2026-05-29 트림+루프 보강: 결정 5·6 추가 + 결정 3 구현 정합 노트)
 - 날짜: 2026-05-28
 
 ## 맥락
@@ -95,6 +95,8 @@ crop_frames → encode_frames(스케줄 반영)  # 공간 크롭 → 인코딩
 
 **WHY 2단계 인덱싱**: gap_policy는 "어떤 원본 프레임을 보일 것인가"(occlusion·CUT 정책), 타임리맵은 "그 출력 프레임들을 시간축에서 어떻게 배열할 것인가"를 결정한다. 두 책임이 직교하므로 각자의 인덱스 공간을 유지하고 연결 지점만 명시한다. CUT 정책으로 원본 프레임이 빠지면 출력 인덱스가 달라지는데, 타임리맵이 원본 기준으로 구간을 해석했다면 인덱스가 어긋난다. 출력 프레임 기준으로 구간을 정의함으로써 이 혼동을 원천 차단한다.
 
+> **구현 정합 노트(트림+루프 슬라이스, 2026-05-29):** 실제 구현(`core/export/video_export.py`)은 위 2단계 인덱싱을 **채택하지 않았다.** `app.export`가 `build_output_indices`로 고른 프레임을 `crop_frames`로 크롭한 뒤 `crops`만 `encode_frames`에 넘기고, 거기서 `build_playback_schedule(len(crops), ...)`로 segments·trim을 **출력 crops 시퀀스 상대 [0, n)** 단일 좌표로 해석한다. `gap_policy=BACKGROUND`(기본)에서는 `build_output_indices`가 항등이라 crops=span 전체 → crops 상대 == span 상대로 **우연히 일치**하지만, CUT/FREEZE에서는 crops가 압축돼 **crops 인덱스 ≠ span 상대 인덱스**가 되어 segments·trim이 어긋나는 **잠복 버그**가 있다. 현재 슬라이스는 **BACKGROUND 전제**로만 정합을 보장하며, CUT/FREEZE 정합을 위한 2단계 인덱싱은 **후속 과제**다(리스크 §7 "2단계 인덱싱 버그" 추적).
+
 `VideoExportConfig`에 `segments` 필드를 추가한다:
 
 ```python
@@ -131,6 +133,34 @@ def clamp_durations_for_gif(
 - GIF 경로에서만 `build_playback_schedule` 직후, `_encode_gif` 호출 전에 적용한다. 인코더 구현(`_encode_gif`)을 오염시키지 않는다.
 - MP4는 프레임 복제/드롭으로 시간을 표현하므로 10ms 양자화 문제와 무관하다. GIF 전용 가드임을 명시한다.
 - `배속 0.25~4.0은 절대 한계가 아니라 base_fps 의존 한계`다. GIF는 50fps(=20ms) 이상 빠르게 만들 수 없다. 이 제약을 ADR·계획서·UI 툴팁에 명시한다.
+
+### 5. (보강, 2026-05-29) 트림(출력 구간 제한)을 `VideoExportConfig.trim: TrimRange | None`로 추가한다 — 트림 먼저, segments 트림-로컬 평행이동
+
+계획서 §8에서 "하이라이트 트림 + 슬로우 + 루프"(덕후 1순위)로 예약했던 트림을 구현한다.
+
+```python
+@dataclass(frozen=True)
+class TrimRange:
+    """출력 트림 구간 값객체(불변). 출력 시퀀스 상대 [start, end) (start 포함, end 미포함).
+    BACKGROUND 정책에서는 span 상대와 일치(결정 3 구현 정합 노트 참조)."""
+    start: int
+    end: int
+```
+
+- `core/timing/timeremap.py`에 순수 함수 `slice_for_trim`(트림 슬라이스)·`shift_segments_into_trim`(segments를 [trim.start,trim.end)와 교집합 후 trim.start만큼 평행이동, 트림 밖 드롭, factor 보존)·`validate_trim`(0≤start<end≤n, 한국어 ValueError)을 둔다. 모두 numpy/stdlib 비의존(순수).
+- **적용 순서**: `encode_frames`에서 **`validate_trim` → `slice_for_trim`(crops) → segments 트림-로컬 평행이동(`_with_trim_local_segments`) → `build_playback_schedule(M=트림 길이)`**. 트림 후 입력 길이만 M으로 줄면 **타임리맵 코어는 무변경**이라 segments 회귀가 0이다.
+- **좌표계 단일화**: trim·segments 모두 "출력 시퀀스 상대 [0,n)" 단일 좌표계로 통일해 좌표계 3중화(절대/span/트림)를 차단한다. BACKGROUND 전제는 결정 3 구현 정합 노트와 동일하게 적용된다.
+- **무회귀**: `trim=None`이면 `slice_for_trim`·`shift_segments_into_trim`가 항등 → 기존 경로 바이트 동일.
+
+### 6. (보강, 2026-05-29) GIF 루프 횟수를 `VideoExportConfig.loop_count: int = 0`로 노출한다
+
+```python
+loop_count: int = 0   # 0 = 무한 루프(기존 _encode_gif loop=0 하드코딩과 동일=무회귀), N>0 = N회
+```
+
+- `_encode_gif`의 `loop=`에 전달한다. 매개변수 3개 규칙을 위해 `gif_spec=(duration, loop_count)` 튜플로 묶어 전달한다.
+- 음수 `loop_count`는 한국어 ValueError로 방어한다(`validate_trim`과 일관된 조기 검증).
+- MP4는 컨테이너 루프를 담지 못하므로 core 인코더는 `loop_count`를 **조용히 무시**하고, "MP4 루프 무시" 경고는 UI/노트북 레이어에서만 띄운다(SRP — core가 경고 책임을 갖지 않는다).
 
 ## 대안
 
