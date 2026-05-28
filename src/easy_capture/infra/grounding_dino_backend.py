@@ -91,14 +91,17 @@ class GroundingDinoBackend:
         self._model = self._model.to(self.device)
         self._model.eval()
 
-    def detect(self, frame: np.ndarray, prompt: str = "person") -> list[Detection]:
+    def detect(self, frame: np.ndarray, prompt: str = "person.") -> list[Detection]:
         """프레임에서 prompt에 해당하는 후보들을 검출한다(무거움 — GPU 권장).
 
         PoC h2_cut_retrack.py 패턴 → transformers post_process_grounded_object_detection.
 
         Args:
             frame:  RGB HxWx3 uint8 단일 프레임 (컷 직후 첫 프레임).
-            prompt: Grounding DINO 텍스트 프롬프트(기본 'person').
+            prompt: Grounding DINO 텍스트 프롬프트.
+                    WHY: "person." 형태로 마침표를 붙이는 것이 Grounding DINO 관례.
+                         마침표 없이 "person"만 사용하면 검출 누락이 빈번히 발생한다
+                         (리뷰 [중요] 3 수정).
 
         Returns:
             Detection 리스트(검출 없으면 빈 리스트). score 내림차순 정렬.
@@ -124,10 +127,12 @@ class GroundingDinoBackend:
         with torch.no_grad():
             outputs = self._model(**inputs)
 
+        # WHY: transformers 5.9.0 시그니처: (outputs, input_ids, threshold=, text_threshold=, target_sizes=)
+        #      box_threshold 키워드가 아닌 threshold가 첫 인자명(리뷰 [중요] 1 수정).
         results = self._processor.post_process_grounded_object_detection(
             outputs,
             inputs["input_ids"],
-            box_threshold=self._box_threshold,
+            threshold=self._box_threshold,
             text_threshold=self._text_threshold,
             target_sizes=[(h, w)],
         )[0]

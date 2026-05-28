@@ -16,7 +16,8 @@ import numpy as np
 
 Box = tuple[float, float, float, float]  # (x1, y1, x2, y2)
 
-# 재매칭 통과 임계값 (ADR 0006 — w_pos=0.7·w_cls=0.3 기준)
+# 재매칭 통과 임계값 (ADR 0006 — w_pos=0.7·w_cls=0.3 기준, 위치 IoU 기반)
+# WHY: 0.5는 보수적 시작값. Colab 실측 후 오탐/미탐 비율 확인 시 보정 예정(ADR 0006 갱신 대기).
 REMATCH_THRESHOLD: float = 0.5
 
 
