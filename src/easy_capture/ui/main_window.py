@@ -202,7 +202,9 @@ class ImageMainWindow(QMainWindow):
         if self._frame is None or self._usecase is None:
             return
         if self._worker is not None and self._worker.isRunning():
-            return  # 이전 워커가 실행 중이면 무시
+            # WHY: 단일 워커 정책(다중 클릭 누적은 범위 외). 무시 시 피드백 제공.
+            self._set_status("분석 중입니다. 잠시만 기다려 주세요.")
+            return
 
         self._set_status("분석 중… (처음 실행 시 모델 로드로 시간이 걸릴 수 있습니다)")
         self._worker = _SegWorker(self._usecase, self._frame, (x, y))

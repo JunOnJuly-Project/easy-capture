@@ -127,15 +127,14 @@ class FrameCanvas(QWidget):
         mask_to_rgba로 RGBA 배열을 생성하고 QImage 1회 생성 후
         drawImage 1회로 합성한다. 파이썬 픽셀 이중루프 없음.
 
-        WHY: rgba는 QImage가 버퍼를 참조하므로 painter.end() 완료까지
-             지역 변수로 살려 두어야 한다(조기 GC 방지).
-             ascontiguousarray는 mask_to_rgba에서 이미 보장한다.
+        WHY: QImage(...).copy()로 rgba 버퍼를 즉시 복사해 numpy 의존을 끊는다.
+             (_frame_to_pixmap과 동일 전략 — 버퍼 수명 걱정 제거.)
         """
         rgba = mask_to_rgba(mask)
         h, w = mask.shape
         overlay_img = QImage(
             rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888
-        )
+        ).copy()
 
         result = QPixmap(base.size())
         result.fill(Qt.GlobalColor.transparent)
@@ -143,7 +142,4 @@ class FrameCanvas(QWidget):
         painter.drawPixmap(0, 0, base)
         painter.drawImage(0, 0, overlay_img)
         painter.end()
-
-        # WHY: rgba를 painter.end() 이후까지 살려 두어 GC를 방지한다.
-        del rgba
         return result

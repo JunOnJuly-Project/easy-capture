@@ -18,7 +18,6 @@ import numpy as np
 # --- SegmentationBackend는 이미 존재 → import 가능 ---
 from easy_capture.core.segmentation.backend import SegmentationBackend  # noqa: F401
 
-# --- video_io는 아직 미구현 → ImportError는 TDD Red 단계에서 정상 ---
 from easy_capture.infra.video_io import FrameMeta, FrameSource  # noqa: F401
 
 # ---------------------------------------------------------------------------
