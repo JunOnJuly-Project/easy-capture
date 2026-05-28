@@ -38,12 +38,20 @@ class Sam2VideoBackend:
         self._repo = repo
         self._model = None
         self._processor = None
+        # 원본 프레임 크기 — init_session에서 기록, _extract_mask에서 사용
+        # WHY: post_process_masks(original_sizes=...)에 모델 저해상도(256×256)가
+        #      아닌 실제 원본 (h, w)를 전달해야 centroid 좌표계가 일치한다(리뷰 [중요] 1).
+        self._original_hw: tuple[int, int] | None = None
 
     def init_session(self, frames: list[np.ndarray]) -> object:
         """구간 프레임 시퀀스로 SAM2 video 추적 세션을 연다(무거움).
 
         첫 호출 시 _ensure_loaded()로 모델을 지연 로드한다.
         PoC 패턴: processor.init_video_session(video=frames, ...).
+
+        원본 프레임 (h, w)를 self._original_hw에 보관한다.
+        WHY: propagate 단계에서 post_process_masks에 넘길 원본 크기가
+             필요한데, session은 opaque이므로 백엔드 인스턴스에 보관한다.
 
         Args:
             frames: RGB HxWx3 uint8 프레임 리스트 (구간 전체).
@@ -53,6 +61,12 @@ class Sam2VideoBackend:
         """
         self._ensure_loaded()
         import torch  # 지연 import — infra 내부에서만 사용
+
+        # WHY: frames[0].shape[:2] → 원본 (h, w). 모델 저해상도(256×256)가 아닌
+        #      실제 프레임 크기를 기록해 마스크 업샘플링 기준으로 사용한다(PoC 일치).
+        if frames:
+            h, w = frames[0].shape[:2]
+            self._original_hw = (h, w)
 
         session = self._processor.init_video_session(
             video=frames,
@@ -102,7 +116,7 @@ class Sam2VideoBackend:
             for out in self._model.propagate_in_video_iterator(
                 session, start_frame_idx=0
             ):
-                mask = self._extract_mask(out, session)
+                mask = self._extract_mask(out)
                 masks.append(mask)
         return masks
 
@@ -129,24 +143,23 @@ class Sam2VideoBackend:
             .eval()
         )
 
-    def _extract_mask(self, out, session: object) -> np.ndarray:
+    def _extract_mask(self, out) -> np.ndarray:
         """propagate_in_video_iterator 한 스텝 출력에서 bool HxW 마스크를 추출한다.
 
-        PoC 패턴:
-          post = processor.post_process_masks(
-              [out.pred_masks], original_sizes=[(h, w)]
-          )[0]
-          bool HxW = (post > 0).squeeze().
+        post_process_masks에 원본 프레임 크기(self._original_hw)를 전달한다.
+        WHY: PoC(h1_track.py)와 동일하게 원본 (h, w)를 넘겨야 마스크가
+             원본 해상도로 업샘플된다. pred_masks.shape[-2:]는 모델 저해상도
+             (보통 256×256)이므로 centroid 좌표계가 원본과 어긋난다(리뷰 [중요] 1).
+             self._original_hw는 init_session에서 frames[0].shape[:2]로 기록.
 
-        WHY: session에서 원본 크기(h, w)를 추출해 post_process_masks에 전달한다.
-             session.input_frames_size가 없으면 pred_masks shape 역산 폴백.
-             배치/오브젝트 차원(1,1,H,W) → (H,W)로 squeeze해 bool 변환.
+        배치/오브젝트 차원(1,1,H,W) → (H,W)로 squeeze 후 bool 변환.
         """
-        # 원본 크기 추출 — session 구현 의존성이 없도록 pred_masks shape 사용
-        h_w = _infer_original_size(out)
+        # WHY: _original_hw가 None이면 폴백으로 pred_masks shape 사용.
+        #      실제로는 init_session이 항상 먼저 호출되므로 None 분기는 방어 코드.
+        hw = self._original_hw if self._original_hw is not None else _pred_mask_hw(out)
         post = self._processor.post_process_masks(
             [out.pred_masks],
-            original_sizes=[h_w],
+            original_sizes=[hw],
         )[0]
         arr = post.cpu().numpy() if hasattr(post, "cpu") else np.asarray(post)
         # (1, 1, H, W) 또는 (1, H, W) → (H, W) squeeze
@@ -158,13 +171,10 @@ class Sam2VideoBackend:
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
 
-def _infer_original_size(out) -> tuple[int, int]:
-    """propagate 출력에서 원본 (H, W) 크기를 추론한다.
+def _pred_mask_hw(out) -> tuple[int, int]:
+    """pred_masks shape에서 (H, W)를 추출하는 폴백 헬퍼.
 
-    WHY: session에서 원본 크기를 꺼내는 안전한 방법이 없을 때
-         pred_masks shape에서 역산한다. 마지막 두 차원이 (H, W)이다.
+    WHY: _original_hw 미설정 시 방어 코드. 일반 경로에서는 사용되지 않는다.
     """
     shape = out.pred_masks.shape
-    # shape: (batch, obj, H, W) 또는 (batch, H, W) — 뒤에서 2개 차원
-    h, w = int(shape[-2]), int(shape[-1])
-    return h, w
+    return int(shape[-2]), int(shape[-1])
