@@ -20,6 +20,20 @@ def centroid_of_mask(mask) -> tuple[float, float] | None:
     return float(xs.mean()), float(ys.mean())
 
 
+def bbox_of_mask(mask) -> tuple[float, float, float, float] | None:
+    """불리언/0-1 마스크의 외접 bbox (x1, y1, x2, y2). 빈 마스크면 None.
+
+    centroid_of_mask와 완전 대칭 — 같은 파일·같은 패턴.
+    WHY: SAM2 video는 마스크만 반환하고 rematch_score는 bbox를 요구한다.
+         이 헬퍼가 직전 샷 마지막 마스크 → prev_box 변환의 누락 연결고리를 채운다.
+         (계획서 §3-3)
+    """
+    ys, xs = np.where(np.asarray(mask) > 0)
+    if len(xs) == 0:
+        return None
+    return float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max())
+
+
 def _hold_forward(points: list):
     """None 값을 직전 유효 좌표로 채운다(occlusion 시 마지막 위치 홀드)."""
     out, last = [], None

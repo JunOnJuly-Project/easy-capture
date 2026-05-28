@@ -1,9 +1,10 @@
 """테스트 더블(가짜 의존성) 구현.
 
-FakeBackend         — SegmentationBackend Protocol 준수. torch/transformers 비의존.
-FakeFrameSource     — FrameSource Protocol 준수. PyAV/ffprobe 비의존.
-FakeUpscaleBackend  — UpscaleBackend Protocol 준수. torch/transformers 비의존.
-FakeVideoBackend    — VideoSegmentationBackend Protocol 준수. torch/transformers 비의존.
+FakeBackend            — SegmentationBackend Protocol 준수. torch/transformers 비의존.
+FakeFrameSource        — FrameSource Protocol 준수. PyAV/ffprobe 비의존.
+FakeUpscaleBackend     — UpscaleBackend Protocol 준수. torch/transformers 비의존.
+FakeVideoBackend       — VideoSegmentationBackend Protocol 준수. torch/transformers 비의존.
+FakeDetectionBackend   — DetectionBackend Protocol 준수. torch/transformers 비의존.
 
 모든 클래스는 결정적(deterministic) 출력을 보장해 단위 테스트에서
 예측 가능한 결과를 계산할 수 있게 한다.
@@ -20,8 +21,15 @@ FakeVideoBackend    — VideoSegmentationBackend Protocol 준수. torch/transfor
     WHY: track 1회 후 compute_boxes 반복 호출 시 propagate가 재호출되지 않는다는
          "재추적 안 함" 핵심 회귀 가드를 단독으로 검증하기 위해.
          drift(드리프트)·empty_after(occlusion) 옵션으로 프레임별 마스크를 결정적 생성.
+  - FakeDetectionBackend: DetectionBackend Protocol 준수, detect_call_count 스파이 추가
+    (video-shot-retrack 슬라이스).
+    WHY: track이 컷 경계마다 정확히 1회만 detect를 호출하는지 단언하기 위해.
+         시나리오별 후보 리스트(통과/미달/다중/빈)를 주입해 결정적 검출을 흉내 낸다.
+         torch/transformers 전혀 로드하지 않는다.
 """
 from __future__ import annotations
+
+from typing import Sequence
 
 import numpy as np
 
@@ -53,6 +61,22 @@ try:
 except ModuleNotFoundError:
     VideoSegmentationBackend = None  # type: ignore[assignment,misc]
     _HAS_VIDEO_BACKEND = False
+
+# --- DetectionBackend: 샷경계 재추적 슬라이스 구현 전이므로 try/except 격리 ---
+# WHY: core/segmentation/detection_backend.py가 아직 없을 때 fakes.py import 자체가
+#      실패해 기존 테스트를 차단하지 않도록 동일한 패턴을 적용한다.
+#      DetectionBackend·Detection이 없으면 FakeDetectionBackend 관련 테스트만 실패하고
+#      나머지 기존 216개 테스트는 정상 통과한다.
+try:
+    from easy_capture.core.segmentation.detection_backend import (  # noqa: F401
+        Detection,
+        DetectionBackend,
+    )
+    _HAS_DETECTION_BACKEND = True
+except ModuleNotFoundError:
+    Detection = None  # type: ignore[assignment,misc]
+    DetectionBackend = None  # type: ignore[assignment,misc]
+    _HAS_DETECTION_BACKEND = False
 
 # ---------------------------------------------------------------------------
 # 결정적 마스크 생성 헬퍼 상수
@@ -393,3 +417,71 @@ class FakeVideoBackend:
                 cy = int(base_y + i * dy)
                 masks.append(_make_rect_mask(h, w, cx, cy, _VIDEO_MASK_HALF_SIZE))
         return masks
+
+
+# ---------------------------------------------------------------------------
+# FakeDetectionBackend
+# ---------------------------------------------------------------------------
+
+class FakeDetectionBackend:
+    """DetectionBackend Protocol을 준수하는 테스트 더블.
+
+    torch·transformers·Grounding DINO를 전혀 import하지 않는다.
+    생성자에 시나리오별 후보 리스트를 주입해 결정적 검출을 흉내 낸다.
+
+    시나리오 주입 방식:
+      - candidates_sequence: 호출 순서대로 반환할 후보 리스트의 리스트.
+        예: [[Detection(...)], [], [Detection(...), Detection(...)]]
+        주입하지 않으면 candidates_fixed로 고정 반환.
+      - candidates_fixed: 매 호출마다 동일한 후보 리스트 반환(기본 []).
+
+    속성:
+        detect_call_count: detect 호출 횟수 스파이 카운터.
+            WHY: track이 컷 경계마다 정확히 1회만 detect를 호출하는지 단언하고,
+                 compute_boxes 반복 호출 시 detect가 재호출되지 않음을 강제한다.
+                 FakeVideoBackend.propagate_call_count의 검출 전용판.
+    """
+
+    device: str = "cpu"
+
+    def __init__(
+        self,
+        candidates_fixed: "list | None" = None,
+        candidates_sequence: "list[list] | None" = None,
+    ) -> None:
+        """시나리오 후보 주입.
+
+        candidates_fixed: 매 호출마다 동일하게 반환할 Detection 리스트.
+            None이면 빈 리스트([])를 항상 반환.
+        candidates_sequence: 호출 순서별 후보 리스트의 시퀀스.
+            주어지면 candidates_fixed를 무시하고 호출 순서대로 꺼낸다.
+            시퀀스 소진 후에는 candidates_fixed(또는 [])를 반환한다.
+
+        WHY: 통과/미달/다중후보/빈검출 4종 시나리오를 생성자에서 주입해
+             테스트 코드에서 직접 Grounding DINO 동작을 모사한다.
+        """
+        self._candidates_fixed: list = candidates_fixed if candidates_fixed is not None else []
+        # 시퀀스 복사 — 소비 중 원본 변경 방지
+        self._candidates_sequence: list[list] = (
+            list(candidates_sequence) if candidates_sequence is not None else []
+        )
+        # 스파이 카운터 — 초기값 0, detect 호출마다 +1
+        self.detect_call_count: int = 0
+
+    def detect(self, frame: np.ndarray, prompt: str = "person") -> list:
+        """프레임에서 후보 Detection 리스트를 반환한다(결정적). 호출마다 카운터 +1.
+
+        Given: RGB HxWx3 프레임, 텍스트 프롬프트(무시됨 — 결정적 반환)
+        When:  detect 호출
+        Then:  주입된 시나리오에 따른 Detection 리스트 반환, detect_call_count +1
+
+        WHY: 카운터를 먼저 증가시켜야 조기 반환에서도 카운트된다.
+             frame·prompt는 무시 — 테스트에서 원하는 후보를 생성자에서 주입한다.
+        """
+        # WHY: 카운터를 먼저 증가
+        self.detect_call_count += 1
+
+        if self._candidates_sequence:
+            # 시퀀스에서 순서대로 꺼낸다
+            return self._candidates_sequence.pop(0)
+        return list(self._candidates_fixed)
