@@ -31,6 +31,7 @@ from easy_capture.core.crop import (
     smooth_centroids,
 )
 from easy_capture.core.crop.crop import ASPECT_PRESETS
+from easy_capture.core.crop.mask_refine import largest_component
 from easy_capture.core.export.video_export import (
     VideoExportConfig,
     crop_frames,
@@ -360,9 +361,9 @@ class VideoCaptureUseCase:
                 match_result = RematchResult(best_index=-1, score=0.0, passed=False)
 
             if match_result.passed:
-                click = _box_center(match_result.best_index, candidates)
-                shot_masks, shot_centroids = _run_shot(
-                    self._backend, shot_frames, click
+                box = candidates[match_result.best_index].box
+                shot_masks, shot_centroids = _run_shot_box(
+                    self._backend, shot_frames, box
                 )
                 all_masks.extend(shot_masks)
                 all_centroids.extend(shot_centroids)
@@ -415,8 +416,11 @@ class VideoCaptureUseCase:
         acc = _ShotAccumulator()
         for idx, (start, end) in enumerate(plan.shots):
             shot_frames = frames[start:end]
+            box = plan.box_for(idx)
             click = plan.point_for(idx, first_point=point)
-            if click is not None:
+            if box is not None:
+                acc.add(*_run_shot_box(self._backend, shot_frames, box), needs_correction=False)
+            elif click is not None:
                 acc.add(*_run_shot(self._backend, shot_frames, click), needs_correction=False)
             else:
                 self._track_auto_shot(frames[start], shot_frames, acc)
@@ -438,8 +442,8 @@ class VideoCaptureUseCase:
             else RematchResult(best_index=-1, score=0.0, passed=False)
         )
         if match.passed:
-            click = _box_center(match.best_index, candidates)
-            acc.add(*_run_shot(self._backend, shot_frames, click), needs_correction=False)
+            box = candidates[match.best_index].box
+            acc.add(*_run_shot_box(self._backend, shot_frames, box), needs_correction=False)
         else:
             masks, centroids = _run_failed_shot(self._backend, shot_frames, acc.centroids)
             acc.add(masks, centroids, needs_correction=True)
@@ -460,6 +464,7 @@ class _SelectionPlan:
     shots: list[tuple[int, int]]
     cut_frames: list[int]
     point_by_shot: dict[int, tuple[int, int]]
+    box_by_shot: dict[int, tuple[float, float, float, float]]
 
     @classmethod
     def build(
@@ -472,7 +477,23 @@ class _SelectionPlan:
         shots = split_into_shots(n_frames, cut_frames)
         validate_selections(selections, len(shots))
         point_by_shot = index_selections_by_shot(selections, len(shots))
-        return cls(shots=shots, cut_frames=list(cut_frames), point_by_shot=point_by_shot)
+        box_by_shot = {s.shot_index: s.box for s in selections if s.box is not None}
+        return cls(
+            shots=shots,
+            cut_frames=list(cut_frames),
+            point_by_shot=point_by_shot,
+            box_by_shot=box_by_shot,
+        )
+
+    def box_for(
+        self,
+        shot_index: int,
+    ) -> tuple[float, float, float, float] | None:
+        """샷의 명시 box를 반환한다(없으면 None — point/자동 폴백 신호).
+
+        WHY: box가 있으면 중심점(point)보다 우선해 add_box 디스패치한다(box 우선 정책).
+        """
+        return self.box_by_shot.get(shot_index)
 
     def point_for(
         self,
@@ -528,13 +549,43 @@ def _run_shot(
     shot_frames: list[np.ndarray],
     point: tuple[int, int],
 ) -> tuple[list[np.ndarray], list]:
-    """단일 샷 SAM2 init+click+propagate → (masks, centroids).
+    """단일 샷 SAM2 init+click(point)+propagate → (정제 masks, centroids).
 
-    WHY: 첫 샷과 후속 샷 재초기화 모두 동일한 패턴이므로 헬퍼로 추출(DRY).
+    WHY: 첫 샷·미달 폴백·point 선택 모두 동일한 point 패턴이므로 헬퍼로 추출(DRY).
+         box 프롬프트 경로는 _run_shot_box를 쓴다(중심점 변환 폐기).
     """
     session = backend.init_session(shot_frames)
     backend.add_click(session, point)
-    masks = backend.propagate(session)
+    return _propagate_refined(backend, session)
+
+
+def _run_shot_box(
+    backend: VideoSegmentationBackend,
+    shot_frames: list[np.ndarray],
+    box: tuple[float, float, float, float],
+) -> tuple[list[np.ndarray], list]:
+    """단일 샷 SAM2 init+box 프롬프트+propagate → (정제 masks, centroids).
+
+    WHY: 자동 재매칭 통과 샷·box 선택 샷은 detect 전신 bbox를 그대로 SAM2 box
+         프롬프트로 넘겨야 마스크가 정확하다(중심점 1개 → 전신 bbox 회귀 해결).
+         _run_shot(point)과 대칭 — propagate·정제·centroid 로직은 공유한다.
+    """
+    session = backend.init_session(shot_frames)
+    backend.add_box(session, box)
+    return _propagate_refined(backend, session)
+
+
+def _propagate_refined(
+    backend: VideoSegmentationBackend,
+    session: object,
+) -> tuple[list[np.ndarray], list]:
+    """propagate 후 각 마스크에 최대 연결성분 정제를 적용해 (masks, centroids) 반환.
+
+    WHY: box/point 어느 경로든 인접 파편(옆사람 팔)이 섞일 수 있으므로 확정
+         직후 largest_component로 본체만 남긴다(B3). bbox/centroid는 정제된
+         마스크 기준으로 계산돼 크롭이 자동 정상화된다(compute_boxes 무변경).
+    """
+    masks = [largest_component(m) for m in backend.propagate(session)]
     centroids = [centroid_of_mask(m) for m in masks]
     return masks, centroids
 
@@ -553,7 +604,7 @@ def _run_failed_shot(
     session = backend.init_session(shot_frames)
     h, w = shot_frames[0].shape[:2]
     backend.add_click(session, (w // 2, h // 2))
-    masks = backend.propagate(session)
+    masks, _ = _propagate_refined(backend, session)
     last_valid = _last_valid_centroid(prev_centroids)
     centroids = [last_valid] * len(masks)
     return masks, centroids
@@ -571,20 +622,6 @@ def _extract_prev_box(
         if box is not None:
             return box
     return None
-
-
-def _box_center(
-    best_idx: int,
-    candidates: list,
-) -> tuple[int, int]:
-    """best 후보 박스의 중심점을 클릭 포인트로 변환한다.
-
-    WHY: SAM2 재초기화에 add_click(point) 재사용(KISS).
-    """
-    box = candidates[best_idx].box
-    cx = int((box[0] + box[2]) / 2)
-    cy = int((box[1] + box[3]) / 2)
-    return cx, cy
 
 
 def _last_valid_centroid(

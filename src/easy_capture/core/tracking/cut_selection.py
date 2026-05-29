@@ -25,13 +25,19 @@ class CutSelection:
 
     shot_index: split_into_shots 결과의 샷 인덱스(0-기반).
     point:      사용자가 클릭한 좌표 (x, y) — SAM2 재초기화 add_click 입력.
+    box:        선택 대상 전신 bbox (x1, y1, x2, y2) — SAM2 box 프롬프트 입력.
+                default None(하위호환). box가 있으면 add_box 우선 디스패치한다.
 
     WHY: frozen=True로 사용자 선택이 실수로 덮어씌워지는 버그를 차단한다.
          (샷, 클릭점)을 한 단위로 묶어 매개변수 폭증을 방지한다.
+         box: box 프롬프트(detect 전신 bbox→SAM2)로 중심점 1개(point)보다
+         정확한 전신 마스크를 얻기 위해 전신 bbox를 함께 보관한다(Story D).
+         default None으로 기존 (shot_index, point) 생성 코드를 깨지 않는다.
     """
 
     shot_index: int
     point: tuple[int, int]
+    box: tuple[float, float, float, float] | None = None
 
 
 def index_selections_by_shot(

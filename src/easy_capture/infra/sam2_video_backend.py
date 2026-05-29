@@ -96,6 +96,35 @@ class Sam2VideoBackend:
             input_labels=[[[1]]],
         )
 
+    def add_box(
+        self,
+        session: object,
+        box: tuple[float, float, float, float],
+    ) -> None:
+        """첫 프레임(frame_idx=0)에 전경 bbox 프롬프트를 등록한다.
+
+        PoC(셀 7) 패턴: processor.add_inputs_to_inference_session(
+            session, frame_idx=0, obj_ids=1,
+            input_boxes=[[[x1, y1, x2, y2]]]
+        ).
+
+        WHY: transformers 5.9.0은 input_boxes를 정식 지원하며, box는 내부에서
+             corner-points로 변환된다. clear_old_inputs 기본 True(box 제약 충족).
+             add_click과 대칭 — point 대신 detect 전신 bbox를 그대로 넘겨
+             '중심점 1개'보다 정확한 전신 마스크를 얻는다(PoC 회귀 해결).
+
+        Args:
+            session: init_session이 반환한 opaque 세션.
+            box: (x1, y1, x2, y2) 이미지 좌표계 전경 bbox.
+        """
+        x1, y1, x2, y2 = (float(v) for v in box)
+        self._processor.add_inputs_to_inference_session(
+            session,
+            frame_idx=0,
+            obj_ids=1,
+            input_boxes=[[[x1, y1, x2, y2]]],
+        )
+
     def propagate(self, session: object) -> list[np.ndarray]:
         """세션을 끝까지 전파해 프레임별 bool HxW 마스크 리스트를 반환한다(무거움).
 

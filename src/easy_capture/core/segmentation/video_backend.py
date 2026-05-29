@@ -56,6 +56,25 @@ class VideoSegmentationBackend(Protocol):
         """
         ...
 
+    def add_box(
+        self,
+        session: object,
+        box: tuple[float, float, float, float],
+    ) -> None:
+        """첫 프레임(frame_idx=0)에 전경 bbox 프롬프트를 등록한다.
+
+        WHY: PoC는 detect 전신 bbox를 SAM2 box 프롬프트로 직접 넘겨 마스크가
+             정확했는데, production이 박스 중심점(point) 1개만 넘기는 방식으로
+             회귀해 마스크가 부정확·과대해졌다. box 프롬프트로 복귀하기 위해
+             add_click과 대칭인 별도 메서드를 추가한다(ISP/OCP — 단일샷·폴백
+             point 경로는 add_click 그대로 두어 무회귀 보장, ADR 0010 메서드 분리 연장).
+
+        Args:
+            session: init_session이 반환한 opaque 세션.
+            box: (x1, y1, x2, y2) 이미지 좌표계 전경 bbox.
+        """
+        ...
+
     def propagate(self, session: object) -> list[np.ndarray]:
         """세션을 끝까지 전파해 프레임별 bool HxW 마스크 리스트를 반환한다(무거움).
 
