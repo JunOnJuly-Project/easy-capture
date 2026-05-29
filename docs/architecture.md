@@ -19,8 +19,8 @@
                 │
 ┌───────────────┴────────────────────────────────────┐
 │ Core (도메인 로직, UI/IO 비의존)                     │
-│  segmentation · source · tracking · correction ·    │
-│  crop · upscale · export · timing(예정)              │
+│  segmentation · source · tracking(cut_selection 포함)│
+│  crop(mask_refine 포함) · upscale · export · timing  │
 └───────────────▲────────────────────────────────────┘
                 │
 ┌───────────────┴────────────────────────────────────┐
@@ -41,12 +41,12 @@
 | `app/usecase` | 모드별 흐름 오케스트레이션, Session 상태 관리 |
 | `core/segmentation` | **3종 Protocol 추상**: `SegmentationBackend`(이미지 단일 프레임 마스크), `VideoSegmentationBackend`(단일 샷 프레임 전파 추적, ADR 0010), `DetectionBackend`(컷 경계 재검출·무상태, ADR 0012) |
 | `core/source` | `FrameSource`·`FrameSpan`·`FrameMeta` Protocol — 이미지/영상 프레임 공급 추상 |
-| `core/tracking` | 갭 정책(gap_policy, 기본=BACKGROUND)·재매칭 점수(rematch\_score)·샷 분할(split\_into\_shots)·떨림완화(smooth\_boxes). SAM2 video 구현체는 infra에 위치 |
-| `core/correction` | 지정 프레임부터 부분 재추적, 이전 성공 구간 보존·병합 |
-| `core/crop` | centroid 산출, N-프레임 이동평균 떨림완화, 경계 클램프, 짝수 정렬, LANCZOS4 리사이즈, 종횡비 잠금 |
+| `core/tracking` | 갭 정책(gap_policy, 기본=BACKGROUND)·재매칭 점수(rematch\_score)·샷 분할(split\_into\_shots)·떨림완화(smooth\_boxes)·**컷별 오브젝트 명시 선택(cut\_selection: `CutSelection`·`index_selections_by_shot`·`validate_selections`, ADR 0006 보강)**. SAM2 video 구현체는 infra에 위치 |
+| `core/correction` | **(미구현·대체됨)** 자동 재매칭이 멀티샷에서 구조적 한계를 보여, 별도 부분 재추적 모듈 대신 **컷별 명시 선택(`core/tracking/cut_selection`)**으로 대체했다(ADR 0006 보강). 사용자가 각 컷의 추적 대상을 직접 지정 → 컷별 재추적 |
+| `core/crop` | centroid 산출, N-프레임 이동평균 떨림완화, 경계 클램프, 짝수 정렬, LANCZOS4 리사이즈, 종횡비 잠금. **마스크 정제(`mask_refine.largest_component`: 가장 큰 4-연결 성분만 남겨 인접 멤버 파편 제거, numpy 순수·scipy/cv2 비의존, ADR 0014)** |
 | `core/upscale` | `UpscaleBackend` Protocol(ADR 0009) + 순수 정규화 함수(`reconstruction_to_rgb_uint8`). SwinIR/Real-ESRGAN 구현체는 infra에 위치 |
 | `core/export` | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(yuv420p·오디오 mux), 갭 채우기 정책 적용 |
-| `core/timing` | 구간별 가변 재생속도(슬로우/패스트) 순수 로직 — **계획 단계, 미구현** |
+| `core/timing` | 구간별 가변 재생속도(슬로우/패스트) + 트림(출력 구간 제한) + GIF 루프 순수 로직 — **구현 완료**(`build_playback_schedule`·`schedule_to_cfr_indices`·`clamp_durations_for_gif`·`slice_for_trim`, numpy/stdlib만, ADR 0013) |
 | `infra/sam2_image_backend` | `Sam2ImageBackend` — `SegmentationBackend` 구현 (transformers 5.9.0 `Sam2Model`) |
 | `infra/sam2_video_backend` | `Sam2VideoBackend` — `VideoSegmentationBackend` 구현 (transformers 5.9.0 `Sam2VideoModel`) |
 | `infra/grounding_dino_backend` | `GroundingDinoBackend` — `DetectionBackend` 구현 (transformers 5.9.0) |
@@ -68,11 +68,14 @@ class SegmentationBackend(Protocol):
     def segment_image(self, frame, points=None, boxes=None) -> Mask: ...
     def supports_video(self) -> bool: ...   # 이미지 전용 백엔드는 False
 
-# core/segmentation/video_backend.py  — 단일 샷 프레임 시퀀스 전파 (ADR 0010)
+# core/segmentation/video_backend.py  — 단일 샷 프레임 시퀀스 전파 (ADR 0010·0014)
 class VideoSegmentationBackend(Protocol):
     device: str
     def init_session(self, frames: list[np.ndarray]) -> object: ...
     def add_click(self, session: object, point: tuple[int, int]) -> None: ...
+    def add_box(self, session: object, box: tuple[float, float, float, float]) -> None: ...
+    # box 프롬프트(detect 전신 bbox→SAM2): add_click보다 정확한 전신 마스크(ADR 0014)
+    # add_click은 무변경 유지(단일샷 폴백·무회귀)
     def propagate(self, session: object) -> list[np.ndarray]: ...
     # 구현체: infra/sam2_video_backend (transformers 5.9.0 Sam2VideoModel)
 

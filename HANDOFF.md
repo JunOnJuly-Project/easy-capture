@@ -100,21 +100,24 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 - SAM2 추적이 **CPU ≈0.10 fps**라 GPU 필수인 사실은 유지되나, **Colab GPU(T4)로 앱 검증 노트북 실행 → 추적·크롭·슬로우모션·트림·루프 전부 정상 동작 확인**(사용자 검증). 개발/검증 경로 = Colab GPU 확립, 실사용은 GPU 전제. → **비디오 모드 진행 블로커 해소.**
 - **측정**: 단일샷 200f → ✅ AC-01 **100%**. 멀티샷 군무 300f(컷6) → AC-01 92.3%이나 🚨 **needs_correction 248(82.7%)**·마스크 과대(군무 재추적 품질 저하). ❌ AC-06 **2.3 fps**(목표 10 미달, fp16·경량 백엔드 후속). → **수동 교정 UI 착수**(needs_correction 해소) + 마스크 정제 후속.
 
+### 완료 (이번 세션, 2026-05-29) ✅
+- 🎬 **슬로우모션 6 Story**(core `timing/timeremap`·GIF per-frame duration·MP4 프레임복제·export·UI 구간테이블·노트북, ADR 0013)
+- ✂️ **트림+슬로우+루프**(출력 구간 트림·GIF loop_count, ADR 0013 보강)
+- 🎯 **수동 교정 = 컷별 오브젝트 선택**(core `CutSelection`·app `detect_cut_candidates`/`track(selections=)`·노트북, ADR 0006 보강) — needs_correction **자동 248→49**(detect 마침표 버그 수정)·**컷별 선택 0**
+- 🎭 **마스크 정제 = SAM2 box 프롬프트(`add_box`) + `largest_component`**(ADR 0014, 0010 연계)
+- 🟢 **비디오 GPU 실검증**(단일샷 AC-01 100%, 멀티샷 92%) — GPU 블로커 해소
+- 🔧 detect 프롬프트 기본값 일원화(`DEFAULT_DETECT_PROMPT="person."`, Protocol·infra 공유)
+
 ### 미완료 (다음 작업 순서) ⏳
-1. **✅ 슬로우모션(타임리맵) 구현 — 6 Story 전체 완료** (계획서 `docs/plans/video-speed-remap-plan.md`):
-   - ✅ **ADR 0013 + Story 1**(`feature/timing/timeremap-core`): `core/timing/timeremap.py` 순수 로직 — `SpeedSegment`·`normalize_segments`·`PlaybackSchedule`(frame_indices·durations_ms tuple)·`build_playback_schedule`·`schedule_to_cfr_indices`·`clamp_durations_for_gif`. 테스트 53개(전체 355 통과). 코드 리뷰 [중요] 2 반영(CFR 잔여 가드·tuple화). segments=() 무회귀.
-   - ✅ **Story 2**(`feature/export/gif-variable-duration`): `VideoExportConfig.segments` + `_encode_gif` 프레임별 duration(`build_playback_schedule`→`clamp_durations_for_gif` 연결, 10ms 클램프, loop=0 유지). 테스트 +7(전체 362). segments=() 무회귀. 리뷰 [중요] 0.
-   - ✅ **Story 3**(`feature/export/mp4-frame-replication`): MP4 `_resolve_mp4_frames` — `schedule_to_cfr_indices`로 슬로우=프레임 복제·패스트=드롭(CFR). 테스트 +5(전체 367, ffmpeg 실인코딩). 단일 패스트 가드([중요1]) 실검증. segments=() 무회귀. 리뷰 [중요] 0.
-   - ✅ **Story 4**(`feature/app/export-timeremap`): `estimate_output_frame_count(n_selected, segments, fps) → int` 순수 헬퍼 구현(`core/timing/timeremap.py`). `build_playback_schedule` + `schedule_to_cfr_indices` 위임으로 실제 MP4 출력 프레임 수 사전계산. 4 xfail → 379 passed. `core.timing.__init__` 공개 심볼 추가. export segments end-to-end는 기존 encode_frames 위임 구조(S2/S3)가 이미 처리. 무회귀.
-   - ✅ **Story 5**(`feature/ui/speed-segment-table`): `ui/segment_table.py` — `SegmentTableWidget`(구간 테이블·배속 콤보·미리보기→구간 버튼) + 순수(`rows_to_segments`·`dynamic_fast_cap`·`PRESET_FACTORS`). video_window 통합: export에 segments 연결·GIF 클램프/폭증 경고·동적 패스트 상한 콤보. 테스트 +49(전체 430). 리뷰 [중요] 2 반영(좌표계 상대 정합·dead code 연결). `dynamic_fast_cap` 공식 `50/base_fps` 정정(계획서도).
-   - ✅ **Story 6**(`feature/poc/notebook-timeremap`): 노트북에 셀 9.5(SpeedSegment 구간 + 스케줄 요약·클램프/폭증 경고) + 셀 10 segments 연결. 데스크톱과 동일 core 함수(재현성). API 정합 스모크 통과.
-   - 🎉 **슬로우모션 6 Story 전체 완성** — 구간별 가변 재생속도(다중 구간) core→GIF/MP4→export→데스크톱 UI→노트북.
-   - 📌 백로그: 미리보기 스크럽(prev/next — 임의 프레임 구간 지정, 페르소나 [치명적·UX] 잔여), 클램프 경고 확인 다이얼로그, segment_logic 물리 분리.
-   - 📌 백로그(리뷰 [제안]): Story 3 가드 테스트 주석 "1프레임"→"1~2프레임" 정정, GIF fallback `1000/12.0` → `_DEFAULT_FPS` 상수화(GIF/MP4 일관).
-   - 잔여 디테일: 미리보기 프레임 스크럽(prev/next, Story 5), 저fps GIF 패스트 경고 문구, [중요1] CFR 단일 패스트 가드는 Story 3에서 실인코딩 검증.
-2. **✅ 비디오 Colab GPU 검증** (2026-05-29): 앱 검증 노트북(`poc/colab/easy_capture_app_verify.ipynb`) GPU(T4) 실행으로 **추적(SAM2 video)·크롭 정합·슬로우모션·트림·루프 전부 정상 동작 확인**(사용자). → 잔여 ②: 컷 섞인 **멀티샷 재추적**(재매칭 threshold 0.5)·AC-01(유지율)/AC-06(fps) 수치 정량화는 멀티샷 클립으로 추가 검증 권장.
-3. **이미지 모드 GUI 수동 스모크** (선택): `python -m easy_capture` → 이미지 → 클릭 → 종횡비/크기 → (업스케일) 저장 실사용 확인. (실모델 코드 스모크는 완료 — API·centroid·업스케일 정합 확인됨)
-4. **비디오 후속 슬라이스**: ✅ 수동 교정 = **컷별 오브젝트 선택**(core `CutSelection`·app `detect_cut_candidates`/`track(selections=)`·노트북 Story 3 완료 — 컷별 명시 선택으로 자동 재매칭 82.7% 실패 대체, 혼합 정책·무회귀). ⏳ Story 4 = 데스크톱 컷별 선택 UI(Colab 게이트 통과 후). 후속: 오디오 동기(H4)·업스케일 결합·타임라인·마스크 과대 정제. (샷경계 재추적·gap UI·트림+슬로우+루프 완료)
+1. 🔴 **Colab box 게이트**: box 프롬프트 마스크 정확도(1인 클로즈업?)·유지율(컷별 선택 시 76%였음)·`largest_component` 후처리 시간(720p≈440ms) 측정
+2. **데스크톱 컷별 선택 UI**(Story 4): 후보 클릭 선택(Colab 게이트 통과 후, GPU 환경 전제)
+3. **멀티샷 AC 정량화**: 컷별 선택 시 유지율·needs_correction 재측정 → REPORT 확정
+4. 🔴 **`largest_component` 성능**: numpy BFS 720p≈440ms/프레임, 긴 클립 100s+ → numpy 벡터화 또는 infra cv2 폴백
+5. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
+6. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / AC-06 fp16 최적화
+
+### 백로그(리뷰 [제안])
+- 미리보기 스크럽(prev/next), 클램프 경고 확인 다이얼로그, segment_logic 물리 분리, GIF fallback `1000/12.0`→상수화.
 
 > ✅ 전 슬라이스 main fast-forward 머지 완료(2026-05-28). 이후 **모든 새 슬라이스는 main에서 분기**(끝에 선형 누적 안티패턴 중단).
 

@@ -14,6 +14,24 @@ Keep a Changelog 형식 준수. 버전은 Semantic Versioning을 따른다.
   - 앱 검증 노트북(`poc/colab/easy_capture_app_verify.ipynb`) 설치 셀 수정(editable→sys.path, Colab `ModuleNotFoundError` 해결) + 조절 파라미터 노출. 테스트 300개(신규 16).
 
 ### 추가
+- **비디오 마스크 정제 — box 프롬프트 + 최대 연결성분** (`feature/video/mask-refine`, ADR 0014 신규·ADR 0010 연계)
+  - GPU 실검증에서 마스크 과대(추적 대상의 배 + 옆 멤버의 팔)로 1인 클로즈업이 아니라 군무 여러 명이 담기던 문제를 해결.
+  - SAM2 box 프롬프트 도입: `VideoSegmentationBackend` Protocol에 `add_box(session, box)` 추가(`add_click`은 무변경 유지·무회귀). Grounding DINO의 전신 bbox를 SAM2에 직접 전달해 점 1개(point)보다 정확한 전신 마스크를 얻는다. PoC 노트북이 통과했던 box 프롬프트를 production에 복원(회귀 수정).
+  - `core/crop/mask_refine.largest_component`: SAM2 마스크에서 가장 큰 4-연결 성분만 남겨 인접 멤버 파편을 제거하는 순수 함수(numpy만, scipy·cv2 비의존). 마스크 과대 → 크롭 박스 과대 연쇄를 끊는다.
+  - 혼합 디스패치(box 우선, point 폴백): `CutSelection.box`/재매칭 통과 후보 box가 있으면 `add_box`, 없으면 `add_click`.
+  - 전체 561 테스트 통과. ADR 0014 신규(0010 확장·Superseded 아님), 0006·0012 연계. **GPU 노트북 게이트로 마스크 정확도·추적 유지율 재측정 필요**(infra는 CI 미실행).
+- **비디오 수동 교정 = 컷별 오브젝트 명시 선택** (`feature/video/cut-selection`, ADR 0006 보강)
+  - 멀티샷 군무에서 자동 재매칭(IoU 기반, appearance feature 없음)이 `needs_correction` 다발로 구조적 한계를 드러냄 → 각 컷(샷) 시작 프레임의 후보를 사용자에게 보여주고, 사용자가 추적 대상을 명시 선택하면 그 선택으로 컷별 재추적하는 방식으로 전환. 자동 재매칭은 폴백으로만 유지(혼합 정책).
+  - `core/tracking/cut_selection`: `CutSelection`(샷·클릭점·전신 box 불변 값객체)·`index_selections_by_shot`·`validate_selections`(범위·중복 한국어 ValueError) 순수 함수.
+  - `app/video_capture`: `detect_cut_candidates`(컷별 후보 검출)·`track(selections=)`(샷 인덱스→선택 매핑으로 컷별 SAM2 재초기화). `selections` 미지정 시 기존 자동 재매칭 경로 유지(무회귀).
+  - 앱 검증 노트북에 컷별 선택 흐름 반영. ADR 0006 보강(재매칭 로직 유지·출력만 명시 선택으로 대체). GPU 실검증 결과 컷별 명시 선택 시 `needs_correction` 0건 확인.
+- **비디오 슬로우모션 — 구간별 가변 재생속도** (`feature/timing/*`, ADR 0013 신규·트림+루프 보강)
+  - 추적·크롭이 끝난 프레임 시퀀스에 구간별 배속(슬로우모션·패스트포워드)을 적용해 GIF/MP4로 내보낸다.
+  - `core/timing/timeremap`: `build_playback_schedule`(프레임 수+구간 배속+기준 fps→재생 스케줄)·`schedule_to_cfr_indices`(MP4 CFR 프레임 복제/드롭)·`clamp_durations_for_gif`(GIF per-frame duration 10ms 하한 가드 — 빠르게 만들려다 오히려 느려지는 역전 방지) 순수 함수. numpy·stdlib만 의존(imageio·torch 비의존).
+  - `PlaybackSchedule` 이중 표현(frame_indices + durations_ms): GIF는 per-frame duration 직접 적용, MP4는 프레임 복제로 시간 표현 → 두 백엔드를 한 스케줄로 대칭 지원.
+  - **트림+슬로우+루프**(덕후 1순위 보강): `VideoExportConfig.trim`(출력 구간 제한)·`loop_count`(GIF 루프 횟수) 추가. 트림 먼저 슬라이스 후 segments를 트림-로컬로 평행이동해 좌표계 단일화. MP4는 루프를 조용히 무시(경고는 UI/노트북에서만).
+  - `VideoExportConfig.segments = ()`(기본 빈 튜플)이면 항등 스케줄 → 기존 등속 export 무회귀. UI 구간 테이블·검증 노트북 반영.
+  - ADR 0013 신규(타임리맵 순수 로직 위치·이중 표현)·트림+루프 보강. **MVP 슬로우는 프레임 복제 방식이라 끊김(stutter)이 보일 수 있음**(부드러운 슬로우 RIFE 보간은 v1.1).
 - **비디오 occlusion gap 정책 UI** (`feature/video/gap-policy-ui`)
   - 추적이 끊긴(occlusion) 프레임 처리 정책을 UI에서 선택: 배경 유지(BACKGROUND)/컷(CUT)/정지(FREEZE).
   - `ui/video_window` 갭 콤보 + export 시 `VideoExportConfig.gap_policy` 전달. 백엔드 `build_output_indices`는 기존 재사용(UI가 선택값만 노출).
