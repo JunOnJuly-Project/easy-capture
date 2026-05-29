@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-29 (수동 교정 — 컷별 오브젝트 선택 core+app+노트북 완료, 533 테스트. **다음: Colab 검증 게이트(needs_correction 82.7%→? 정량) → 데스크톱 UI**)
+> 최종 업데이트: 2026-05-29 (마스크 정제 — SAM2 box 프롬프트 + largest_component, 561 테스트. **다음: Colab 게이트 — box vs point 마스크 정확도·유지율·후처리 시간**)
 
 ---
 
@@ -47,7 +47,7 @@ python -m easy_capture                    # 시작 화면(모드 선택)
 ### 2-4. 동작 확인 (smoke test)
 
 ```bash
-.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 533개)
+.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 561개)
 ```
 
 GPU 비디오 추적 검증은 `poc/colab/` 노트북(Colab GPU).
@@ -73,7 +73,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`main` (슬로우모션 + 트림/루프 + **수동 교정(컷별 선택) core+app+노트북 머지** — 533 테스트 통과. 데스크톱: 트림·슬로우·루프 GIF/MP4 / 노트북: 컷별 오브젝트 선택 재추적). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). 다음: 🔴 **Colab 검증 게이트**(컷별 선택이 needs_correction 82.7%→감소하는지 정량) → 통과 시 데스크톱 컷별 선택 UI(Story 4). **백로그**: CUT/FREEZE×트림 좌표계(ADR 0013) / 마스크 과대 정제 / 오디오 동기.
+`main` (슬로우모션 + 트림/루프 + 수동 교정(컷별 선택) + **마스크 정제(box 프롬프트·largest_component) 머지** — 561 테스트). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). **검증됨**: 컷별 선택 needs_correction(자동만 248→49 [마침표 버그 수정 기여], 컷별 선택 0). 다음: 🔴 **Colab 게이트** — box 프롬프트 마스크 정확도(1인 클로즈업?)·유지율(컷별 76%였음)·largest_component 후처리 시간. **백로그**: 🔴 largest_component 성능(720p ≈440ms/프레임, 긴 클립 100s+ → numpy 벡터화 또는 infra cv2 폴백) / detect prompt 기본값 일원화(Protocol·Fake·infra 마침표 일관) / CUT/FREEZE×트림(ADR 0013) / 오디오 동기.
 
 ### 완료 ✅
 

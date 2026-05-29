@@ -1,6 +1,6 @@
 # ADR 0010 — 비디오 세그먼테이션 백엔드 Protocol 분리
 
-- 상태: 채택
+- 상태: 채택 (2026-05-29 [ADR 0014]로 `add_box` 확장)
 - 날짜: 2026-05-28
 
 ## 맥락
@@ -99,3 +99,4 @@ class VideoSegmentationBackend(Protocol):
 - [ADR 0011](0011-video-export-location.md) — GIF/MP4 인코딩 위치 결정(같은 비디오 슬라이스 패키지).
 - [비디오 슬라이스 계획서](../plans/video-tracking-slice.md) §5 임계 경로: `VideoSegmentationBackend` Protocol → `FakeVideoBackend` → `VideoCaptureUseCase` 순 구현.
 - 샷경계 재추적(후속 슬라이스): `VideoSegmentationBackend`는 단일 샷 가정. 멀티 샷 재추적 시 `init_session`을 컷마다 재호출하는 패턴으로 Protocol 변경 없이 확장 가능(OCP).
+- [ADR 0014](0014-box-prompt-mask-refine.md) — `VideoSegmentationBackend`에 `add_box`(box 프롬프트) 추가. 3-메서드 분리(add_click 별도) 원칙의 연장으로 ISP/OCP 정합. `add_click` 무변경. 본 ADR을 확장(Superseded 아님).
