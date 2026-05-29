@@ -40,7 +40,12 @@ from easy_capture.core.timing.timeremap import (
     shift_segments_into_trim,
     slice_for_trim,
 )
+from easy_capture.core.tracking.cut_selection import (
+    build_selections_from_choices,
+    pick_box_at,
+)
 from easy_capture.core.tracking.gap_policy import GapPolicy
+from easy_capture.ui.cut_selection_panel import CutSelectionPanel
 from easy_capture.ui.frame_canvas import FrameCanvas
 from easy_capture.ui.segment_table import SegmentTableWidget
 from easy_capture.ui.sizing import (
@@ -109,15 +114,22 @@ class _TrackWorker(QThread):
     track_ready = Signal(object)  # TrackResult
     error = Signal(str)           # 한국어 오류 메시지
 
-    def __init__(self, usecase, frames, point, video_path=None, span=None) -> None:
+    def __init__(
+        self, usecase, frames, point, video_path=None, span=None, selections=None
+    ) -> None:
         """워커 초기화.
 
         Args:
             usecase:    VideoCaptureUseCase 인스턴스.
             frames:     구간 전체 프레임 리스트.
-            point:      클릭 좌표 (x, y).
+            point:      클릭 좌표 (x, y) — 컷 모드 첫 샷 미선택 시 폴백.
             video_path: 비디오 파일 경로(detect_cuts 입력용, None이면 컷 감지 생략).
             span:       FrameSpan(start, end) 구간(detect_cuts 입력용).
+            selections: 샷별 사용자 명시 선택 리스트(없으면 자동 경로, 무회귀).
+
+        WHY: 매개변수 6개 — VideoCaptureUseCase 생성자 결정(조립 의존성은 명시
+             주입이 가독성 우위)을 워커에도 계승한다. selections는 기본 None으로
+             기존 단일 추적 호출을 깨지 않는다.
         """
         super().__init__()
         self._usecase = usecase
@@ -125,6 +137,7 @@ class _TrackWorker(QThread):
         self._point = point
         self._video_path = video_path
         self._span = span
+        self._selections = selections
 
     def run(self) -> None:
         """usecase.detect_cuts → usecase.track을 워커 스레드에서 실행한다."""
@@ -132,7 +145,12 @@ class _TrackWorker(QThread):
 
         try:
             cut_frames = self._resolve_cut_frames()
-            result = self._usecase.track(self._frames, self._point, cut_frames=cut_frames)
+            result = self._usecase.track(
+                self._frames,
+                self._point,
+                cut_frames=cut_frames,
+                selections=self._selections,
+            )
             self.track_ready.emit(result)
         except EmptyTrackError as exc:
             self.error.emit(f"[빈마스크] {exc}")
@@ -148,6 +166,35 @@ class _TrackWorker(QThread):
         if self._video_path is None or self._span is None:
             return None
         return self._usecase.detect_cuts(self._video_path, self._span)
+
+
+class _DetectWorker(QThread):
+    """샷별 추적 후보를 검출하는 가벼운 워커(전파 없음).
+
+    detect_cuts(컷 경계) → detect_cut_candidates(샷별 후보)를 순서대로 수행한다.
+    SAM2 propagate(무거움)는 하지 않으므로 _TrackWorker와 분리한다.
+
+    WHY: 후보 미리보기는 전파 없이 빨라야 한다. 추적(전파)과 검출(가벼움)을
+         별도 워커로 나눠 사용자가 컷 선택 UI를 즉시 볼 수 있게 한다.
+    """
+
+    candidates_ready = Signal(object)  # (cut_frames, list[ShotCandidates]) 튜플
+    error = Signal(str)                # 한국어 오류 메시지
+
+    def __init__(self, usecase, frames, video_path, span) -> None:
+        super().__init__()
+        # WHY: 인자를 튜플로 묶어 매개변수 3개 규칙을 지킨다(_ExportWorker 패턴).
+        self._args = (usecase, frames, video_path, span)
+
+    def run(self) -> None:
+        """detect_cuts → detect_cut_candidates를 워커 스레드에서 실행한다."""
+        usecase, frames, video_path, span = self._args
+        try:
+            cut_frames = usecase.detect_cuts(video_path, span) or []
+            shots = usecase.detect_cut_candidates(frames, cut_frames)
+            self.candidates_ready.emit((cut_frames, shots))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"컷 감지 오류: {exc}")
 
 
 class _ExportWorker(QThread):
@@ -208,6 +255,11 @@ class VideoMainWindow(QMainWindow):
         # 워커
         self._track_worker: _TrackWorker | None = None
         self._export_worker: _ExportWorker | None = None
+        self._detect_worker: _DetectWorker | None = None
+
+        # 컷 선택 모드 상태 — detect_cut_candidates 결과 보관
+        self._shot_candidates: list | None = None
+        self._cut_mode: bool = False
 
         # 트림 활성 여부 — export 시 TrimRange 생성 여부를 결정
         self._trim_enabled: bool = False
@@ -237,7 +289,19 @@ class VideoMainWindow(QMainWindow):
         self._build_frame_inject_buttons(tb)
         self._build_trim_controls(tb)
         self._build_loop_controls(tb)
+        self._build_detect_button(tb)
         self._build_track_save_buttons(tb)
+
+    def _build_detect_button(self, tb: QToolBar) -> None:
+        """컷 감지 버튼을 툴바에 추가한다(샷별 후보 검출 → 컷 선택 모드).
+
+        WHY: 추적(무거움) 전에 컷을 감지해 샷별 후보를 보여줘야 사용자가
+             각 샷의 추적 대상을 선택할 수 있다. 추적 버튼 앞에 배치.
+        """
+        self._detect_btn = QPushButton("컷 감지")
+        self._detect_btn.clicked.connect(self._on_detect)
+        self._detect_btn.setEnabled(False)
+        tb.addWidget(self._detect_btn)
 
     def _build_span_controls(self, tb: QToolBar) -> None:
         """구간 시작/끝 SpinBox를 툴바에 추가한다."""
@@ -404,17 +468,27 @@ class VideoMainWindow(QMainWindow):
         WHY: SegmentTableWidget을 별도 위젯으로 캡슐화해 배선만 담당한다.
              VideoMainWindow가 비대해지지 않도록 SRP 준수.
         """
-        from PySide6.QtWidgets import QHBoxLayout, QWidget
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
         self._canvas = FrameCanvas()
         self._canvas.clicked.connect(self._on_canvas_click)
+        self._canvas.box_clicked.connect(self._on_box_clicked)
 
         self._segment_table = SegmentTableWidget()
+        self._cut_panel = CutSelectionPanel()
+        self._cut_panel.shot_changed.connect(self._on_shot_changed)
+        self._cut_panel.selection_changed.connect(self._on_selection_changed)
+        self._cut_panel.setVisible(False)  # 컷 감지 전까지 숨김
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.addWidget(self._segment_table)
+        right_layout.addWidget(self._cut_panel)
 
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.addWidget(self._canvas, stretch=3)
-        layout.addWidget(self._segment_table, stretch=1)
+        layout.addWidget(right, stretch=1)
         self.setCentralWidget(container)
 
     def _build_statusbar(self) -> None:
@@ -447,6 +521,11 @@ class VideoMainWindow(QMainWindow):
             self._apply_source_fps(meta)
             self._setup_span_controls()
             self._load_first_frame()
+            # 영상 교체는 컷·후보·클릭점을 모두 무효화 → 단일 모드로 강제 복귀.
+            # WHY: 이전 영상의 컷 모드/후보 박스가 남으면 새 영상에서 단일 클릭이
+            #      box_clicked로 오라우팅되고, 잔류 후보로 잘못된 selections가
+            #      빌드된다(reviewer [중요] — 멀티 영상 워크플로우 상태 누수).
+            self._enter_single_mode()
             self._set_status("구간을 설정하고 피사체를 클릭해 주세요.")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "파일 열기 실패", f"파일을 열 수 없습니다.\n{exc}")
@@ -476,6 +555,9 @@ class VideoMainWindow(QMainWindow):
         self._boxes = None
         self._save_btn.setEnabled(False)
         self._sync_trim_spinbox_range()
+        if self._cut_mode:
+            # 구간이 바뀌면 컷·후보가 무효 → 단일 모드로 복귀(재감지 유도)
+            self._enter_single_mode()
 
     def _on_canvas_click(self, x: int, y: int) -> None:
         """캔버스 클릭 시 구간 프레임 로드 + 추적 버튼 활성화."""
@@ -494,13 +576,25 @@ class VideoMainWindow(QMainWindow):
         self._pending_point = (x, y)
 
     def _on_track(self) -> None:
-        """추적 워커를 시작한다(무거움 — propagate 1회)."""
-        # 리뷰 [제안]: hasattr 대신 is not None 검사 통일
-        if self._frames is None or self._pending_point is None:
-            return
+        """추적 워커를 시작한다 — 컷 모드면 selections, 아니면 단일 클릭(무거움)."""
         if self._track_worker is not None and self._track_worker.isRunning():
             self._set_status("추적 중입니다. 잠시만 기다려 주세요.")
             return
+        if self._frames is None:
+            return
+        if self._cut_mode:
+            inputs = self._resolve_cut_track_inputs()
+            if inputs is None:
+                return  # 선택 빌드 오류 — QMessageBox 이미 표시됨
+            point, selections = inputs
+        else:
+            if self._pending_point is None:
+                return
+            point, selections = self._pending_point, None
+        self._start_track_worker(point, selections)
+
+    def _start_track_worker(self, point, selections) -> None:
+        """추적 워커를 생성·시작한다(단일/컷 공통 경로)."""
         self._set_status(
             "추적 중… (처음 실행 시 모델 로드로 시간이 걸릴 수 있습니다)"
         )
@@ -508,13 +602,43 @@ class VideoMainWindow(QMainWindow):
         self._track_worker = _TrackWorker(
             self._usecase,
             self._frames,
-            self._pending_point,
+            point,
             video_path=self._video_path,
             span=self._pending_span,
+            selections=selections,
         )
         self._track_worker.track_ready.connect(self._on_track_ready)
         self._track_worker.error.connect(self._on_track_error)
         self._track_worker.start()
+
+    def _resolve_cut_track_inputs(self):
+        """컷 모드 추적 입력 (point, selections)을 빌드한다(오류 시 None).
+
+        패널 선택(인덱스) → core build_selections_from_choices(좌표·box)로 변환한다.
+        ValueError(범위/중복)는 한국어 QMessageBox로 흡수하고 None을 반환한다.
+        """
+        choices = self._cut_panel.to_choices()
+        candidate_boxes = _candidate_boxes_from(self._shot_candidates)
+        try:
+            selections = build_selections_from_choices(candidate_boxes, choices)
+        except ValueError as exc:
+            QMessageBox.warning(
+                self, "컷 선택 오류", f"컷 선택에 오류가 있습니다.\n\n{exc}"
+            )
+            return None
+        return self._cut_mode_fallback_point(), selections
+
+    def _cut_mode_fallback_point(self) -> tuple[int, int]:
+        """컷 모드에서 첫 샷 미선택 시 쓸 폴백 클릭점을 반환한다.
+
+        WHY: track(point=)은 첫 샷이 미선택일 때만 쓰이는 폴백이다. 사용자가
+             캔버스를 클릭했으면 그 좌표를, 아니면 첫 프레임 중앙을 쓴다.
+        """
+        if self._pending_point is not None:
+            return self._pending_point
+        frame = self._frames[0]
+        height, width = frame.shape[:2]
+        return width // 2, height // 2
 
     def _on_track_ready(self, result) -> None:
         """추적 결과 도착 시 박스 재계산 + 저장 버튼 활성화.
@@ -544,6 +668,121 @@ class VideoMainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "추적 실패", message)
             self._set_status("추적에 실패했습니다. 다시 시도해 주세요.")
+
+    # ------------------------------------------------------------------
+    # 컷 선택 모드 슬롯 (Task 4-5)
+    # ------------------------------------------------------------------
+
+    def _on_detect(self) -> None:
+        """컷 감지 워커를 시작한다(구간 프레임 로드 후 샷별 후보 검출)."""
+        if self._usecase is None:
+            return
+        if self._detect_worker is not None and self._detect_worker.isRunning():
+            return
+        try:
+            self._frames, self._pending_span = self._load_span_frames_with_span()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "구간 로드 실패", str(exc))
+            return
+        self._set_status("컷 감지 중…")
+        self._detect_btn.setEnabled(False)
+        self._detect_worker = _DetectWorker(
+            self._usecase, self._frames, self._video_path, self._pending_span
+        )
+        self._detect_worker.candidates_ready.connect(self._on_candidates_ready)
+        self._detect_worker.error.connect(self._on_detect_error)
+        self._detect_worker.start()
+
+    def _on_candidates_ready(self, payload) -> None:
+        """컷 감지 결과 도착 — 컷 유무에 따라 모드를 자동 전환한다."""
+        cut_frames, shots = payload
+        self._detect_btn.setEnabled(True)
+        if not cut_frames or not shots:
+            self._enter_single_mode()
+            self._set_status(
+                "컷이 감지되지 않았습니다. 피사체를 클릭해 단일 추적하세요."
+            )
+            return
+        self._enter_cut_mode(shots)
+
+    def _on_detect_error(self, message: str) -> None:
+        """컷 감지 실패 시 한국어 안내."""
+        self._detect_btn.setEnabled(True)
+        QMessageBox.warning(self, "컷 감지 실패", message)
+        self._set_status("컷 감지에 실패했습니다. 다시 시도해 주세요.")
+
+    def _enter_cut_mode(self, shots: list) -> None:
+        """컷 선택 모드로 전환 — 패널 표시 + 첫 샷 후보 박스 표시."""
+        self._shot_candidates = shots
+        self._cut_mode = True
+        self._pending_point = None  # 컷 모드 폴백은 첫 샷 미선택 시 중앙(좌표 오염 방지)
+        self._cut_panel.set_shots(shots)
+        self._cut_panel.setVisible(True)
+        self._show_shot(0)
+        self._track_btn.setEnabled(True)
+        self._set_status(
+            f"{len(shots)}개 샷 감지 — 각 샷에서 추적 대상을 선택하고 '추적 실행'."
+        )
+
+    def _enter_single_mode(self) -> None:
+        """단일 클릭 모드로 복귀 — 패널 숨김 + 캔버스 박스 해제(무회귀).
+
+        WHY: _pending_point도 리셋해 이전 컷/단일 좌표가 다음 작업의 폴백으로
+             새지 않게 한다(reviewer [제안] — 폴백 좌표 오염 방지).
+        """
+        self._cut_mode = False
+        self._shot_candidates = None
+        self._pending_point = None
+        self._cut_panel.setVisible(False)
+        self._canvas.clear_boxes()
+
+    def _show_shot(self, shot_index: int) -> None:
+        """샷의 첫 프레임을 캔버스에 띄우고 후보 박스를 표시한다."""
+        if self._shot_candidates is None or self._frames is None:
+            return
+        shot = self._shot_candidates[shot_index]
+        self._canvas.set_frame(self._frames[shot.first_frame_index])
+        self._refresh_shot_boxes()
+
+    def _refresh_shot_boxes(self) -> None:
+        """현재 샷 후보 박스와 패널 선택(대상/배제 색)을 캔버스에 반영한다."""
+        if self._shot_candidates is None:
+            return
+        choice = self._cut_panel.current_choice()
+        self._canvas.set_boxes(
+            self._current_shot_boxes(), choice.target_idx, choice.negative_idxs
+        )
+
+    def _current_shot_boxes(self) -> list:
+        """현재 샷의 후보 box 리스트를 반환한다(Detection→box, DRY).
+
+        WHY: _refresh_shot_boxes·_on_box_clicked가 같은 인덱스 계산을 공유하므로
+             헬퍼로 추출해 한쪽만 바뀌어 어긋나는 위험을 없앤다(reviewer [제안]).
+        """
+        index = self._cut_panel.current_shot_index()
+        return [d.box for d in self._shot_candidates[index].candidates]
+
+    def _on_shot_changed(self, shot_index: int) -> None:
+        """패널 샷 변경 시 해당 샷 프레임·박스로 캔버스를 갱신한다."""
+        self._show_shot(shot_index)
+
+    def _on_selection_changed(self) -> None:
+        """패널 선택(대상/배제) 변경 시 캔버스 박스 색을 갱신한다."""
+        self._refresh_shot_boxes()
+
+    def _on_box_clicked(self, x: int, y: int) -> None:
+        """캔버스 박스 클릭 → 후보 hit-test → 대상(positive)으로 빠른 지정.
+
+        WHY: 히트테스트는 core.pick_box_at에 위임한다(겹침 시 최소 넓이).
+             배제(negative)는 패널 체크박스로 지정한다(MVP — 캔버스는 대상 지정).
+        """
+        if self._shot_candidates is None:
+            return
+        hit = pick_box_at((x, y), self._current_shot_boxes())
+        if hit is not None:
+            self._cut_panel.set_target(hit)
+        else:
+            self._set_status("후보 박스 안을 클릭해 추적 대상을 지정하세요.")
 
     def _on_frame_to_start(self) -> None:
         """현재 미리보기 구간 첫 프레임(상대 0)을 선택 행의 시작으로 주입한다.
@@ -681,6 +920,7 @@ class VideoMainWindow(QMainWindow):
         self._span_start.setEnabled(True)
         self._span_end.setEnabled(True)
         self._track_btn.setEnabled(False)
+        self._detect_btn.setEnabled(True)
         self._frame_to_start_btn.setEnabled(True)
         self._frame_to_end_btn.setEnabled(True)
         # 트림 SpinBox 범위를 span 길이로 제한 — 로드 시점에 초기화
@@ -874,6 +1114,16 @@ class VideoMainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
+
+def _candidate_boxes_from(shots: list) -> list[list[tuple[float, float, float, float]]]:
+    """ShotCandidates 리스트에서 샷별 box 리스트를 추출한다(Detection→box 변환).
+
+    WHY: build_selections_from_choices는 box(좌표)만 받는다(core 경계). ui가
+         Detection을 core에 직접 넘기지 않도록 video_window에서 box만 추출한다.
+         이 변환 지점이 ui→core 경계를 box-only로 강제한다.
+    """
+    return [[d.box for d in shot.candidates] for shot in shots]
+
 
 def _build_track_status(result) -> str:
     """TrackResult로부터 상태바 메시지를 생성한다.
