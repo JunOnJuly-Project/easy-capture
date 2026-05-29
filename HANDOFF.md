@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-29 (**🟢 멀티샷 GPU 게이트 통과** — hiera-small + 컷별 선택(box+negative) → AC-01 100%·needs_correction 0·2.0fps. **다음: 데스크톱 컷별 선택 UI(Story 4, GPU 전제) + 노트북 SAM2_REPO small 기본화**)
+> 최종 업데이트: 2026-05-29 (Story 4 데스크톱 컷별 선택 UI 착수 — Task 4-1 core 변환 완료. **작업 브랜치 `feature/ui/cut-selection-ui`**(main 미머지). 멀티샷 GPU 게이트 통과(small·AC-01 100%) 후속)
 
 ---
 
@@ -74,6 +74,11 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 
 ### 현재 브랜치
 `main` (슬로우모션 + 트림/루프 + 수동 교정(컷별 선택) + **마스크 정제(box 프롬프트·largest_component) 머지** — 561 테스트). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). **검증됨**: 컷별 선택 needs_correction(자동만 248→49 [마침표 버그 수정 기여], 컷별 선택 0). **🟢 멀티샷 GPU 게이트 통과**(2026-05-29): hiera-small + 컷별 선택(box+negative) → 멀티샷 군무 300프레임 **AC-01 100%·needs_correction 0·2.0fps**(tiny는 재합침으로 미달 → small 필요). 다음: **데스크톱 컷별 선택 UI(Story 4, GPU 전제)** + **노트북 SAM2_REPO small 기본화**. **백로그**: AC-06 2.0fps 개선(경량 백엔드 v1.1) / CUT/FREEZE×트림(ADR 0013) / 오디오 동기.
+
+**▶ 진행 중 — 작업 브랜치 `feature/ui/cut-selection-ui`** (Story 4: 데스크톱 컷별 선택 UI. **방향 확정: GPU PC 전제 로컬 프로그램**):
+- ✅ Task 4-1(`9ed2e73`): core 변환 `box_center`·`pick_box_at`(클릭 hit-test)·`ShotChoice`·`build_selections_from_choices`(노트북 셀7.5 이식, candidate_boxes로 core→app 역참조 회피). 21테스트.
+- ⏳ 4-2 `frame_canvas` 박스 오버레이+`box_clicked`(hit-test) · 4-3 `ui/cut_selection_panel.py`(샷 네비·positive/negative·`to_choices`) · 4-4 `_DetectWorker` 신설 + **`_TrackWorker`에 `selections` 연결**(현재 미전달!) · 4-5 video_window 통합(컷 유무 모드 자동전환·"컷 감지" 버튼) · 4-6 GPU 게이트(GUI로 멀티샷 100% 재현).
+- 설계(planner): 캔버스 박스 클릭(대상 초록/배제 빨강)+패널+워커 2분할+core 변환 공유. 무회귀(단일클릭·슬로우/트림/루프·export). **ADR 0016 후보**. UI 헤드리스 테스트는 QMessageBox/QFileDialog monkeypatch 필수(hang 교훈).
 
 ### 완료 ✅
 
