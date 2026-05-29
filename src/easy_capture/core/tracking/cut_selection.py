@@ -158,3 +158,144 @@ def _raise_if_negative_equals_positive(
             f"negative 좌표 {negative}가 대상 클릭점과 동일합니다. "
             "같은 점을 대상이자 대상 아님으로 동시에 지정할 수 없습니다."
         )
+
+
+# 중심 좌표 분모 — (좌표합)/2 (매직넘버 금지)
+_CENTER_DIVISOR = 2
+
+
+def box_center(box: tuple[float, float, float, float]) -> tuple[int, int]:
+    """박스 (x1, y1, x2, y2)의 정수 중심 (cx, cy)을 반환한다(순수).
+
+    cx = int((x1 + x2) / 2), cy = int((y1 + y2) / 2) — float 좌표를 정수로 절단.
+
+    Args:
+        box: 전신 bbox (x1, y1, x2, y2).
+
+    Returns:
+        (cx, cy) — SAM2 add_click(point) 입력용 정수 픽셀 좌표.
+
+    WHY: SAM2 클릭점은 정수 픽셀이어야 한다. 노트북 셀 7.5 `_box_center`의
+         int(...) 절단(내림)을 그대로 보존한다(데스크톱 UI 변환 위임).
+    """
+    x1, y1, x2, y2 = box
+    return int((x1 + x2) / _CENTER_DIVISOR), int((y1 + y2) / _CENTER_DIVISOR)
+
+
+def pick_box_at(
+    point: tuple[int, int],
+    boxes: list[tuple[float, float, float, float]],
+) -> int | None:
+    """점을 포함하는 후보 박스의 인덱스를 반환한다(겹침 시 최소 넓이, 밖이면 None).
+
+    Args:
+        point: 클릭 좌표 (x, y).
+        boxes: 후보 박스 리스트 (x1, y1, x2, y2)들.
+
+    Returns:
+        점을 포함하는 박스 중 가장 작은 넓이의 인덱스, 없으면 None.
+
+    WHY: 데스크톱 UI는 클릭 좌표만 안다. 겹친 박스에서 안쪽(작은 박스)을
+         우선해 군무 밀착 구간의 모호성을 해소한다(히트테스트를 core가 담당).
+    """
+    containing = [i for i, box in enumerate(boxes) if _contains(box, point)]
+    if not containing:
+        return None
+    return min(containing, key=lambda i: _box_area(boxes[i]))
+
+
+def _contains(
+    box: tuple[float, float, float, float],
+    point: tuple[int, int],
+) -> bool:
+    """점 (x, y)이 박스 [x1, x2] × [y1, y2] 경계 안(포함)인지 판정한다."""
+    x1, y1, x2, y2 = box
+    x, y = point
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+
+def _box_area(box: tuple[float, float, float, float]) -> float:
+    """박스 넓이 (x2 - x1) × (y2 - y1)를 반환한다(겹침 시 최소 선택 기준)."""
+    x1, y1, x2, y2 = box
+    return (x2 - x1) * (y2 - y1)
+
+
+@dataclass(frozen=True)
+class ShotChoice:
+    """한 샷의 사용자 선택(인덱스만) — UI/core 경계의 입력 DTO(불변).
+
+    target_idx:    대상 후보 인덱스(None=미선택→자동 재매칭 폴백).
+    negative_idxs: 배제할 옆 멤버 후보 인덱스 묶음(default 빈 튜플).
+
+    WHY: 데스크톱 UI는 인덱스(int)만 다룬다. core가 ShotChoice(인덱스)를
+         CutSelection(좌표·box)으로 변환해 core→app 역참조를 회피한다.
+    """
+
+    target_idx: int | None
+    negative_idxs: tuple[int, ...] = ()
+
+
+def build_selections_from_choices(
+    candidate_boxes: list[list[tuple[float, float, float, float]]],
+    choices: dict[int, ShotChoice],
+) -> list[CutSelection]:
+    """샷별 후보 박스 + 선택(인덱스) → 검증된 CutSelection 리스트로 변환한다(순수).
+
+    shot_index 오름차순으로 순회한다. target_idx가 None이거나 후보 수를 초과하면
+    그 샷은 건너뛴다(자동 재매칭 폴백). 빌드 후 validate_selections로 검증한다.
+
+    Args:
+        candidate_boxes: 샷별 후보 박스 리스트(box만 — app DTO 비참조).
+        choices:         {shot_index: ShotChoice} 사용자 선택 매핑.
+
+    Returns:
+        shot_index 오름차순 정렬된 CutSelection 리스트.
+
+    WHY: 노트북 셀 7.5 변환 루프 이식. 딕셔너리 순서 의존을 제거해 결정적
+         출력을 보장하고, 빌드 결과가 항상 범위·중복 유효함을 검증으로 보장한다.
+    """
+    selections = []
+    for shot_index in sorted(choices):
+        selection = _build_one_selection(
+            shot_index, candidate_boxes[shot_index], choices[shot_index]
+        )
+        if selection is not None:
+            selections.append(selection)
+    validate_selections(selections, len(candidate_boxes))
+    return selections
+
+
+def _build_one_selection(
+    shot_index: int,
+    boxes: list[tuple[float, float, float, float]],
+    choice: ShotChoice,
+) -> CutSelection | None:
+    """한 샷의 ShotChoice를 CutSelection으로 변환한다(미선택·범위밖이면 None).
+
+    target_idx가 None이거나 후보 수를 초과하면 None(폴백)을 반환한다.
+    negative_idxs는 자기 자신·범위 밖 인덱스를 제외하고 box 중심으로 변환한다.
+    """
+    target_idx = choice.target_idx
+    if target_idx is None or not 0 <= target_idx < len(boxes):
+        return None
+    box = boxes[target_idx]
+    negatives = _build_negative_points(boxes, choice.negative_idxs, target_idx)
+    return CutSelection(
+        shot_index=shot_index,
+        point=box_center(box),
+        box=box,
+        negative_points=negatives,
+    )
+
+
+def _build_negative_points(
+    boxes: list[tuple[float, float, float, float]],
+    negative_idxs: tuple[int, ...],
+    target_idx: int,
+) -> tuple[tuple[int, int], ...]:
+    """negative 후보 인덱스를 box 중심으로 변환한다(자기·범위밖 제외, 셀 7.5 규칙)."""
+    return tuple(
+        box_center(boxes[ni])
+        for ni in negative_idxs
+        if ni != target_idx and 0 <= ni < len(boxes)
+    )

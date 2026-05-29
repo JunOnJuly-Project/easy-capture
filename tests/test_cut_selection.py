@@ -63,6 +63,31 @@ _MSG_NO_VALIDATE_NEGATIVES = (
     "core/tracking/cut_selection.py에 validate_negative_points 미구현 — RED 예상"
 )
 
+# --- Task 4-1: core 변환 순수 함수 격리(데스크톱 컷별 선택 UI 공유 — RED) ---
+# WHY: 데스크톱 GUI는 후보 인덱스(int)만 다루고, 박스 중심 변환·박스 히트테스트·
+#      dict(SHOT_TARGETS/NEG_TARGETS)→CutSelection 빌드를 core 순수 함수에 위임한다
+#      (노트북 셀 7.5 로직 이식, core→app 역참조 회피). 신규 심볼이 없으면 변환
+#      테스트만 skip되고 기존 테스트(위 import 블록)는 통과한다(무회귀 격리).
+try:
+    from easy_capture.core.tracking.cut_selection import (
+        ShotChoice,
+        box_center,
+        build_selections_from_choices,
+        pick_box_at,
+    )
+    _HAS_CONVERTERS = True
+except ImportError:
+    ShotChoice = None  # type: ignore[assignment,misc]
+    box_center = None  # type: ignore[assignment]
+    build_selections_from_choices = None  # type: ignore[assignment]
+    pick_box_at = None  # type: ignore[assignment]
+    _HAS_CONVERTERS = False
+
+_MSG_NO_CONVERTERS = (
+    "core/tracking/cut_selection.py에 box_center·pick_box_at·ShotChoice·"
+    "build_selections_from_choices 미구현 — Task 4-1 RED 예상"
+)
+
 # CutSelection.negative_points 필드 존재 여부 판별 — 미구현 시 negative 테스트만 skip.
 # WHY: negative_points는 신규(하위호환 default ()) 필드다. dataclasses.fields로
 #      존재를 판별해, 필드 추가 전에는 negative 테스트만 skip되고 기존은 통과한다.
@@ -130,6 +155,54 @@ if _HAS_CUT_SELECTION:
     _HAS_BOX_FIELD = any(f.name == "box" for f in _dc_fields(CutSelection))
 
 _MSG_NO_BOX_FIELD = "CutSelection.box 필드 미구현 — box 프롬프트 RED 예상"
+
+# ---------------------------------------------------------------------------
+# Task 4-1: core 변환 순수 함수 테스트 상수 (합성 box — 작게, 매직넘버 금지)
+# ---------------------------------------------------------------------------
+# box_center 검증용 — 짝수 합성 box로 중심이 정수로 떨어지게 한다.
+# (10, 20, 30, 60) → cx=(10+30)/2=20, cy=(20+60)/2=40
+BOX_CENTER_INPUT = (10.0, 20.0, 30.0, 60.0)
+BOX_CENTER_EXPECTED = (20, 40)
+
+# box_center 정수 절단(int) 검증용 — 홀수 합으로 .5가 버려져 내림된다.
+# (0, 0, 11, 21) → cx=11/2=5.5→5, cy=21/2=10.5→10
+BOX_CENTER_ODD_INPUT = (0.0, 0.0, 11.0, 21.0)
+BOX_CENTER_ODD_EXPECTED = (5, 10)
+
+# pick_box_at 합성 후보 박스 — 서로 겹치지 않는 작은 박스 2개(인덱스 위치 검증).
+# HIT_BOX_0: 좌상단, HIT_BOX_1: 우하단. 클릭점이 어느 박스 안인지로 인덱스 매핑.
+HIT_BOX_0 = (0.0, 0.0, 40.0, 40.0)       # 중심 (20, 20)
+HIT_BOX_1 = (100.0, 100.0, 160.0, 160.0)  # 중심 (130, 130)
+HIT_BOXES = [HIT_BOX_0, HIT_BOX_1]
+
+PICK_INSIDE_BOX_0 = (10, 10)    # HIT_BOX_0 안 → idx 0
+PICK_INSIDE_BOX_1 = (120, 120)  # HIT_BOX_1 안 → idx 1
+PICK_OUTSIDE = (300, 300)       # 어느 박스에도 안 들어감 → None
+
+# 겹침(중첩) 박스 — 큰 박스 안에 작은 박스. 겹치는 점은 '안쪽=최소 넓이' 선택.
+# OUTER: 큰 박스(idx 0), INNER: 그 안의 작은 박스(idx 1). 둘 다 포함하는 점은 idx 1.
+OVERLAP_OUTER = (0.0, 0.0, 100.0, 100.0)   # 넓이 10000
+OVERLAP_INNER = (30.0, 30.0, 50.0, 50.0)   # 넓이 400 (더 작음 = 안쪽)
+OVERLAP_BOXES = [OVERLAP_OUTER, OVERLAP_INNER]
+PICK_OVERLAP_POINT = (40, 40)               # 두 박스 모두 포함 → 안쪽(idx 1)
+PICK_ONLY_OUTER_POINT = (10, 10)            # OUTER만 포함(INNER 밖) → idx 0
+
+# build_selections_from_choices 합성 후보 — 샷별 후보 박스 리스트(작은 박스).
+# 샷 2개, 각 샷에 후보 2개. box only(ShotCandidates 아님 — core→app 역참조 회피).
+SHOT0_BOX0 = (10.0, 10.0, 30.0, 50.0)    # 중심 (20, 30)
+SHOT0_BOX1 = (60.0, 10.0, 100.0, 90.0)   # 중심 (80, 50)
+SHOT1_BOX0 = (0.0, 0.0, 20.0, 40.0)      # 중심 (10, 20)
+SHOT1_BOX1 = (50.0, 50.0, 90.0, 130.0)   # 중심 (70, 90)
+CANDIDATE_BOXES = [
+    [SHOT0_BOX0, SHOT0_BOX1],  # 샷 0 후보
+    [SHOT1_BOX0, SHOT1_BOX1],  # 샷 1 후보
+]
+N_SHOTS_2 = 2  # CANDIDATE_BOXES 길이
+
+# 후보 인덱스 (ShotChoice.target_idx / negative_idxs)
+CAND_IDX_0 = 0
+CAND_IDX_1 = 1
+CAND_IDX_OUT_OF_RANGE = 5  # 후보 수(2) 초과 — 자기제외/범위밖 제외 검증용
 
 # 순수성 가드 — import 금지 모듈 목록(core 경계 불변식)
 _FORBIDDEN_MODULES = ("torch", "transformers", "PySide6", "av", "scenedetect")
@@ -815,3 +888,352 @@ class TestValidateNegativePoints:
 
         with pytest.raises(ValueError, match="동일|같"):
             validate_negative_points(selection, FRAME_SIZE)
+
+
+# ===========================================================================
+# Task 4-1: box_center — (x1,y1,x2,y2) → 정수 중심 (노트북 셀 7.5 _box_center 이식)
+# ===========================================================================
+class TestBoxCenter:
+    """box_center: 박스 (x1, y1, x2, y2)의 정수 중심 (cx, cy)을 반환(순수).
+
+    계약(RED):
+      box_center(box) -> tuple[int, int]
+        - cx = int((x1 + x2) / 2), cy = int((y1 + y2) / 2) — float 좌표 → 정수.
+      배경: SAM2 add_click(point=(x, y))는 정수 좌표를 받는다. 데스크톱 UI는
+      후보 박스만 알고, 클릭점 변환은 core가 담당한다(노트북 셀 7.5 _box_center).
+    """
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_박스의_중심을_정수_좌표로_반환한다(self):
+        """Given: box=(10, 20, 30, 60)
+        When:  box_center 호출
+        Then:  (20, 40) — cx=(10+30)/2=20, cy=(20+60)/2=40
+
+        WHY: detect 전신 bbox의 중심을 SAM2 클릭점(point)으로 변환하는 핵심 변환.
+        """
+        assert box_center(BOX_CENTER_INPUT) == BOX_CENTER_EXPECTED
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_중심이_소수면_int로_절단한다(self):
+        """Given: box=(0, 0, 11, 21) — 중심이 (5.5, 10.5)
+        When:  box_center 호출
+        Then:  (5, 10) — int() 절단(내림)
+
+        WHY: SAM2 클릭점은 정수 픽셀이어야 한다. 셀 7.5의 int(...) 절단을 보존한다.
+        """
+        assert box_center(BOX_CENTER_ODD_INPUT) == BOX_CENTER_ODD_EXPECTED
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_반환값은_정수_튜플이다(self):
+        """Given: float 좌표 box
+        When:  box_center 호출
+        Then:  반환 원소가 모두 int 타입
+
+        WHY: float를 그대로 넘기면 SAM2 add_click이 타입 오류를 낼 수 있다.
+        """
+        cx, cy = box_center(BOX_CENTER_INPUT)
+
+        assert isinstance(cx, int)
+        assert isinstance(cy, int)
+
+
+# ===========================================================================
+# Task 4-1: pick_box_at — 클릭점 포함 박스 중 최소 넓이 인덱스(겹침 시 안쪽)
+# ===========================================================================
+class TestPickBoxAt:
+    """pick_box_at: 점을 포함하는 후보 박스의 인덱스(겹침 시 최소 넓이), 밖이면 None.
+
+    계약(RED):
+      pick_box_at(point, boxes) -> int | None
+        - point를 포함하는 박스가 1개 → 그 인덱스.
+        - 여러 박스가 포함 → 가장 작은 넓이 박스의 인덱스(겹침 시 안쪽 우선).
+        - 어느 박스에도 안 들어감 → None.
+      배경: 데스크톱 UI는 사용자가 캔버스를 클릭한 좌표만 안다. 그 좌표가 어느
+      후보 박스(인덱스)인지 판정하는 히트테스트를 core가 담당한다(UI는 int만 다룸).
+    """
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_박스_안의_점이면_그_인덱스를_반환한다(self):
+        """Given: 겹치지 않는 박스 2개, 점이 박스 0 안
+        When:  pick_box_at 호출
+        Then:  0 (점을 포함하는 박스의 인덱스)
+
+        WHY: 사용자가 클릭한 좌표를 후보 인덱스로 변환하는 기본 히트테스트.
+        """
+        assert pick_box_at(PICK_INSIDE_BOX_0, HIT_BOXES) == CAND_IDX_0
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_다른_박스_안의_점이면_해당_인덱스를_반환한다(self):
+        """Given: 겹치지 않는 박스 2개, 점이 박스 1 안
+        When:  pick_box_at 호출
+        Then:  1 — 인덱스 매핑이 위치별로 정확
+
+        WHY: 인덱스가 항상 0으로 고정되는 버그를 막는다(위치별 분기 검증).
+        """
+        assert pick_box_at(PICK_INSIDE_BOX_1, HIT_BOXES) == CAND_IDX_1
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_어느_박스에도_없으면_None을_반환한다(self):
+        """Given: 박스 2개, 점이 모든 박스 밖
+        When:  pick_box_at 호출
+        Then:  None — 빈 영역 클릭은 선택 없음
+
+        WHY: 배경(빈 영역) 클릭은 추적 대상이 아니다. UI가 None으로 '선택 해제'를
+             판단할 수 있어야 한다(예외가 아니라 None 신호).
+        """
+        assert pick_box_at(PICK_OUTSIDE, HIT_BOXES) is None
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_겹친_박스_중_점을_포함하면_더_작은_박스의_인덱스를_반환한다(self):
+        """Given: 큰 박스(idx 0) 안에 작은 박스(idx 1), 점이 둘 다 포함
+        When:  pick_box_at 호출
+        Then:  1 (더 작은 넓이 = 안쪽 박스)
+
+        WHY: 군무에서 큰 박스가 작은 박스를 덮을 때, 사용자가 안쪽을 클릭하면
+             의도한 안쪽 후보(작은 박스)를 골라야 한다(겹침 모호성 해소 규칙).
+        """
+        assert pick_box_at(PICK_OVERLAP_POINT, OVERLAP_BOXES) == CAND_IDX_1
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_안쪽_박스_밖이고_바깥_박스만_포함하면_바깥_인덱스를_반환한다(self):
+        """Given: 큰 박스(idx 0) 안에 작은 박스(idx 1), 점이 큰 박스만 포함
+        When:  pick_box_at 호출
+        Then:  0 (작은 박스 밖이므로 유일하게 포함하는 큰 박스)
+
+        WHY: 최소 넓이 규칙이 '포함하는 박스들 중에서만' 적용돼야 한다.
+             점을 포함하지 않는 작은 박스를 잘못 고르면 안 된다.
+        """
+        assert pick_box_at(PICK_ONLY_OUTER_POINT, OVERLAP_BOXES) == CAND_IDX_0
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_빈_박스_목록이면_None을_반환한다(self):
+        """Given: boxes=[] (후보 없음)
+        When:  pick_box_at 호출
+        Then:  None — 후보가 없으면 선택할 수 없음
+
+        WHY: 검출 후보가 0개인 샷에서 클릭이 들어와도 예외 없이 None이어야 한다.
+        """
+        assert pick_box_at(PICK_INSIDE_BOX_0, []) is None
+
+
+# ===========================================================================
+# Task 4-1: ShotChoice — UI가 다루는 인덱스 묶음(target_idx + negative_idxs)
+# ===========================================================================
+class TestShotChoice:
+    """ShotChoice: 한 샷의 사용자 선택(인덱스만) — target_idx, negative_idxs.
+
+    계약(RED):
+      ShotChoice(target_idx: int | None, negative_idxs: tuple[int, ...])
+        - target_idx: 대상 후보 인덱스(None=미선택→폴백).
+        - negative_idxs: 배제할 옆 멤버 후보 인덱스 묶음.
+      배경: 데스크톱 UI는 인덱스(int)만 안다. core가 ShotChoice(인덱스) →
+      CutSelection(좌표·box)으로 변환한다. UI/core 경계의 입력 DTO다.
+    """
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_target_idx와_negative_idxs를_보관한다(self):
+        """Given: target_idx=0, negative_idxs=(1,)
+        When:  ShotChoice 생성
+        Then:  .target_idx == 0, .negative_idxs == (1,)
+
+        WHY: UI가 고른 대상·배제 후보 인덱스를 한 단위로 묶어 core에 전달한다.
+        """
+        choice = ShotChoice(target_idx=CAND_IDX_0, negative_idxs=(CAND_IDX_1,))
+
+        assert choice.target_idx == CAND_IDX_0
+        assert choice.negative_idxs == (CAND_IDX_1,)
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_target_idx가_None일_수_있다(self):
+        """Given: target_idx=None, negative_idxs=()
+        When:  ShotChoice 생성
+        Then:  .target_idx is None
+
+        WHY: 사용자가 어떤 샷을 선택 안 하면(미선택) target_idx=None → 그 샷은
+             자동 재매칭 폴백으로 처리된다(노트북 셀 7.5 SHOT_TARGETS.get None).
+        """
+        choice = ShotChoice(target_idx=None, negative_idxs=())
+
+        assert choice.target_idx is None
+
+
+# ===========================================================================
+# Task 4-1: build_selections_from_choices — dict(인덱스) → list[CutSelection]
+# ===========================================================================
+class TestBuildSelectionsFromChoices:
+    """build_selections_from_choices: 샷별 후보 박스 + 선택(인덱스) → CutSelection 리스트.
+
+    계약(RED, 노트북 셀 7.5 변환 루프 이식):
+      build_selections_from_choices(candidate_boxes, choices) -> list[CutSelection]
+        - candidate_boxes: list[list[Box]] — 샷별 후보 박스(box만, ShotCandidates 아님).
+        - choices: dict[int, ShotChoice] — {샷 인덱스: 선택}.
+        - 샷별: target_idx None 또는 범위 초과 → skip(폴백).
+                box = 후보박스[target_idx], point = box_center(box).
+                negative_idxs → box_center(자기(target_idx)·범위 밖 인덱스 제외).
+        - CutSelection(shot_index, point, box=box, negative_points=negs) 빌드 + 검증.
+      core→app 역참조 회피: ShotCandidates(app DTO)가 아니라 box 리스트만 받는다.
+    """
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_빈_choices면_빈_리스트를_반환한다(self):
+        """Given: candidate_boxes는 있고 choices={}
+        When:  build_selections_from_choices 호출
+        Then:  [] — 선택이 없으면 전 샷 자동 재매칭 폴백
+
+        WHY: 아무 샷도 선택 안 하면 빈 리스트(자동 경로 신호)여야 한다(무회귀).
+        """
+        result = build_selections_from_choices(CANDIDATE_BOXES, {})
+
+        assert result == []
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_target_idx가_None인_샷은_건너뛴다(self):
+        """Given: 샷0 choice의 target_idx=None
+        When:  build_selections_from_choices 호출
+        Then:  [] — 미선택 샷은 CutSelection을 만들지 않음
+
+        WHY: target_idx None은 '이 샷 미선택→폴백' 신호다(셀 7.5 ti is None → continue).
+        """
+        choices = {SHOT_0: ShotChoice(target_idx=None, negative_idxs=())}
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert result == []
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_일부_샷만_선택하면_그_샷만_CutSelection이_생성된다(self):
+        """Given: 샷1만 target_idx=0 선택(샷0 미선택)
+        When:  build_selections_from_choices 호출
+        Then:  CutSelection 1개, shot_index==1
+
+        WHY: 혼합 시나리오 — 선택한 샷만 CutSelection으로, 나머지는 폴백.
+        """
+        choices = {SHOT_1: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=())}
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert len(result) == 1
+        assert result[0].shot_index == SHOT_1
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_선택한_샷의_box와_point가_후보박스_중심으로_채워진다(self):
+        """Given: 샷0 target_idx=0 (후보박스 SHOT0_BOX0=(10,10,30,50))
+        When:  build_selections_from_choices 호출
+        Then:  .box == SHOT0_BOX0, .point == box_center(SHOT0_BOX0)=(20, 30)
+
+        WHY: box 프롬프트는 후보 전신 bbox 그대로, point는 그 중심(셀 7.5 변환).
+        """
+        choices = {SHOT_0: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=())}
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert result[0].box == SHOT0_BOX0
+        assert result[0].point == box_center(SHOT0_BOX0)
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_negative_idxs는_해당_후보박스_중심으로_채워진다(self):
+        """Given: 샷0 target_idx=0, negative_idxs=(1,) (배제 후보 SHOT0_BOX1)
+        When:  build_selections_from_choices 호출
+        Then:  .negative_points == (box_center(SHOT0_BOX1),)=( (80, 50), )
+
+        WHY: 옆 멤버(negative)도 box 중심점(label 0)으로 변환된다(셀 7.5 negs).
+        """
+        choices = {
+            SHOT_0: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=(CAND_IDX_1,))
+        }
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert result[0].negative_points == (box_center(SHOT0_BOX1),)
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_negative가_target과_같은_인덱스면_제외된다(self):
+        """Given: 샷0 target_idx=0, negative_idxs=(0,) (대상 자신)
+        When:  build_selections_from_choices 호출
+        Then:  .negative_points == () — 자기 자신은 negative에서 제외
+
+        WHY: 대상(positive)을 동시에 negative로 찍으면 모순이다. 셀 7.5의
+             `ni != ti` 자기제외 규칙을 보존해 무의미·충돌 입력을 거른다.
+        """
+        choices = {
+            SHOT_0: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=(CAND_IDX_0,))
+        }
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert result[0].negative_points == ()
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_범위_밖_negative_인덱스는_제외된다(self):
+        """Given: 샷0 target_idx=0, negative_idxs=(1, 5) (5는 후보 수(2) 초과)
+        When:  build_selections_from_choices 호출
+        Then:  .negative_points == (box_center(SHOT0_BOX1),) — 5는 무시
+
+        WHY: 셀 7.5의 `ni < len(candidates)` 범위밖 제외 규칙. 잘못된 인덱스는
+             IndexError 없이 조용히 걸러내야 한다(UI 입력 방어).
+        """
+        choices = {
+            SHOT_0: ShotChoice(
+                target_idx=CAND_IDX_0,
+                negative_idxs=(CAND_IDX_1, CAND_IDX_OUT_OF_RANGE),
+            )
+        }
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert result[0].negative_points == (box_center(SHOT0_BOX1),)
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_target_idx가_후보_수를_초과하면_건너뛴다(self):
+        """Given: 샷0 target_idx=5 (후보 수(2) 초과)
+        When:  build_selections_from_choices 호출
+        Then:  [] — 범위 밖 대상은 CutSelection을 만들지 않음(폴백)
+
+        WHY: 셀 7.5의 `ti >= len(candidates) → continue`. 잘못된 대상 인덱스는
+             IndexError 대신 폴백 처리한다(UI 입력 방어).
+        """
+        choices = {
+            SHOT_0: ShotChoice(
+                target_idx=CAND_IDX_OUT_OF_RANGE, negative_idxs=()
+            )
+        }
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert result == []
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_생성된_CutSelection은_shot_index_순으로_정렬된다(self):
+        """Given: 샷1·샷0을 모두 선택(딕셔너리 순서 무관)
+        When:  build_selections_from_choices 호출
+        Then:  결과의 shot_index가 [0, 1] 오름차순
+
+        WHY: 오케스트레이션(track)이 샷 순서대로 선택을 적용하므로, 결정적
+             출력을 위해 shot_index 오름차순으로 빌드한다(딕셔너리 순서 의존 제거).
+        """
+        choices = {
+            SHOT_1: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=()),
+            SHOT_0: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=()),
+        }
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert [s.shot_index for s in result] == [SHOT_0, SHOT_1]
+
+    @pytest.mark.skipif(not _HAS_CONVERTERS, reason=_MSG_NO_CONVERTERS)
+    def test_빌드_결과는_validate_selections를_통과한다(self):
+        """Given: 샷0·샷1을 정상 선택, n_shots=2
+        When:  build_selections_from_choices 후 validate_selections 호출
+        Then:  예외 없이 통과(범위·중복 검증 만족)
+
+        WHY: 빌드 함수는 검증된 선택만 내보내야 한다(셀 7.5 → CutSelection 빌드 후
+             track 진입 전 검증). 범위·중복 위반 없는 선택임을 보장한다.
+        """
+        choices = {
+            SHOT_0: ShotChoice(target_idx=CAND_IDX_0, negative_idxs=()),
+            SHOT_1: ShotChoice(target_idx=CAND_IDX_1, negative_idxs=()),
+        }
+
+        result = build_selections_from_choices(CANDIDATE_BOXES, choices)
+
+        assert validate_selections(result, N_SHOTS_2) is None
