@@ -422,3 +422,19 @@ TrackResult.centroids ──► valid_flags
 - **베테랑 아이돌 덕후:** ① 미리보기→구간 버튼이 프레임 번호 암기 없이 최애 파트를 잡게 하는가(SpinBox 단독 부적합 해소). ② 트림+슬로우+루프가 후속에 명확히 잡혔는가. ③ 배속 프리셋(0.25/0.33/0.5/1/2x + 4x 고급)이 직캠 움짤에 충분한가. ④ GIF loop=0 자동 무한루프 강점 보존. (1차 칭찬: 다중 구간 테이블·GIF 자동 루프.)
 
 수렴 규칙: 컨펌 패스에서는 "이미 반영된 항목 재트집 금지". 3인 전원 컨펌 시 ADR 0013 채택 + Story 1 착수(`/develop --tdd`).
+
+---
+
+## 10. 트림+루프 후속 슬라이스 (구현 완료 — 2026-05-29)
+
+§8에서 후속으로 예약한 **"하이라이트 트림 + 슬로우 + 루프"(덕후 1순위)** 를 구현 완료했다. 새 계획서를 만들지 않고 본 문서에 잇는다(추적성).
+
+- **트림**: `VideoExportConfig.trim: TrimRange | None`(출력 시퀀스 상대 `[start, end)`). core 순수 함수 `slice_for_trim`·`shift_segments_into_trim`·`validate_trim`(`core/timing/timeremap.py`). 적용 순서 **트림 먼저 → segments 트림-로컬 평행이동 → `build_playback_schedule(M=트림 길이)`** 로, 타임리맵 코어는 무변경(segments 회귀 0). `trim=None`이면 항등(무회귀).
+- **루프**: `VideoExportConfig.loop_count: int = 0`(0=무한=기존 동작). GIF `_encode_gif(loop=)`에 전달, 음수 ValueError, MP4는 컨테이너 루프 미지원이라 core 무시 + UI/노트북 경고.
+- **좌표계**: trim·segments 모두 **출력 crops 시퀀스 상대** 단일 좌표계. **gap_policy=BACKGROUND 전제**로만 정합(CUT/FREEZE는 crops 압축으로 어긋남 — ADR 0013 결정 3 구현 정합 노트).
+- **이중경로**: 데스크톱 UI(트림 체크박스·시작/끝 SpinBox·loop SpinBox·미리보기→트림 버튼) + Colab 노트북(`TRIM`/`LOOP_COUNT` 변수 셀).
+- **검증**: core+export+UI+노트북 합 **494 passed**. ADR 0013 보강(결정 5·6 + 결정 3 정합 노트). 커밋 `65e5010`·`eaafb3b`·`d73e398`·`384af35`.
+
+### 10-1. 잔여 후속(백로그)
+- **🔴 CUT/FREEZE × 트림/배속 좌표계 정합**: gap_policy가 비BACKGROUND이면 `build_output_indices`가 crops를 압축해 crops 인덱스 ≠ span 상대 인덱스가 되어 트림/segments가 어긋난다(잠복 버그). ADR 0013 결정 3의 **2단계 인덱싱**(`output_indices[schedule.frame_indices[k]]`) 구현으로 해소. segments 도입 시점부터 존재한 기존 버그이며 트림이 같은 한계를 공유한다.
+- 프레임 보간 슬로우(RIFE), 오디오 타임스트레치 동기, 미리보기 타임라인 GUI(드래그 구간), MP4 진짜 VFR/webm.
