@@ -40,13 +40,21 @@ from easy_capture.core.segmentation.video_backend import (
     EmptyTrackError,
     VideoSegmentationBackend,
 )
+from easy_capture.core.tracking.cut_selection import (
+    CutSelection,
+    index_selections_by_shot,
+    validate_selections,
+)
 from easy_capture.core.tracking.gap_policy import build_output_indices
 from easy_capture.core.tracking.rematch import RematchResult, select_best_match
 from easy_capture.core.tracking.shot_split import split_into_shots
 from easy_capture.core.source.frame_source import FrameSource, FrameSpan
 
 if TYPE_CHECKING:
-    from easy_capture.core.segmentation.detection_backend import DetectionBackend
+    from easy_capture.core.segmentation.detection_backend import (
+        Detection,
+        DetectionBackend,
+    )
 
 # 타입 힌트 전용 alias
 CropBox = tuple[int, int, int, int]
@@ -71,6 +79,24 @@ class TrackResult:
     centroids: list[tuple[float, float] | None]
     needs_correction: list[bool] = field(default_factory=list)
     cut_frames: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ShotCandidates:
+    """한 샷 첫 프레임에서 검출한 추적 대상 후보 묶음(불변).
+
+    shot_index:        split_into_shots 결과의 샷 인덱스(0-기반).
+    first_frame_index: 샷 시작 프레임 인덱스(=후보를 검출한 프레임, UI 썸네일용).
+    candidates:        검출된 Detection 리스트(사용자가 이 중 하나를 선택).
+
+    WHY: UI가 샷별 후보 패널을 띄우려면 (샷, 검출 프레임, 후보들)을 한 단위로
+         묶어야 한다. shot_index가 CutSelection.shot_index와 일치해야
+         선택→재추적이 올바르게 연결된다.
+    """
+
+    shot_index: int
+    first_frame_index: int
+    candidates: "list[Detection]"
 
 
 @dataclass(frozen=True)
@@ -166,25 +192,51 @@ class VideoCaptureUseCase:
         frames = self._source.read_frames(first_span)
         return frames[0] if frames else self._source.read_frame(span.start)
 
+    def detect_cut_candidates(
+        self,
+        frames: list[np.ndarray],
+        cut_frames: list[int],
+    ) -> "list[ShotCandidates]":
+        """각 샷 첫 프레임에서 추적 대상 후보를 1회씩 검출한다(가벼움 — 전파 없음).
+
+        detector=None이면 빈 리스트를 반환한다(검출 불가 폴백).
+        SAM2 propagate는 호출하지 않는다 — track(무거움)과 분리된 가벼운 단계다.
+
+        Args:
+            frames:     구간 전체 RGB 프레임 리스트.
+            cut_frames: 컷 경계 프레임 인덱스 리스트.
+
+        Returns:
+            샷별 ShotCandidates 리스트(샷 수만큼). detector 없으면 [].
+
+        WHY: 사용자 선택 UI를 위한 검출만 수행한다. 무거운 전파를 일으키면
+             후보 미리보기가 느려지므로 검출/추적을 명확히 분리한다.
+        """
+        if self._detector is None:
+            return []
+        shots = split_into_shots(len(frames), cut_frames)
+        return [
+            self._detect_shot_candidates(frames, idx, start)
+            for idx, (start, _end) in enumerate(shots)
+        ]
+
     def track(
         self,
         frames: list[np.ndarray],
         point: tuple[int, int],
         cut_frames: list[int] | None = None,
+        selections: "list[CutSelection] | None" = None,
     ) -> TrackResult:
-        """샷 분할 → 샷별 SAM2 track → 경계 재매칭 → objid 유지 (무거움).
+        """샷 분할 → 샷별 SAM2 track → 경계 재매칭/명시 선택 → objid 유지 (무거움).
 
-        detector=None이면 단일 샷 경로(첫 슬라이스 그대로).
-        detector 주입 + cut_frames 제공 시 샷 경계 재추적 모드.
-
-        구간당 propagate는 샷마다 1회, detect는 컷마다 1회.
-        전 프레임 빈 마스크면 EmptyTrackError(한국어 메시지).
+        selections None/빈 리스트면 기존 경로(단일 샷·자동 재매칭) 그대로(무회귀).
+        selections 제공 시 _track_with_selections로 위임(혼합 정책).
 
         Args:
             frames:     구간 전체 RGB 프레임 리스트.
             point:      첫 프레임 클릭 좌표 (x, y).
-            cut_frames: 컷 경계 프레임 인덱스 리스트.
-                        None 또는 빈 리스트 또는 detector=None이면 단일 샷.
+            cut_frames: 컷 경계 프레임 인덱스 리스트(없으면 단일 샷).
+            selections: 샷별 사용자 명시 선택 리스트(없으면 자동 경로).
 
         Returns:
             TrackResult(masks, centroids, needs_correction, cut_frames).
@@ -194,6 +246,9 @@ class VideoCaptureUseCase:
             and cut_frames is not None
             and len(cut_frames) > 0
         )
+        if has_cuts and selections:
+            plan = _SelectionPlan.build(len(frames), cut_frames, selections)  # type: ignore[arg-type]
+            return self._track_with_selections(frames, point, plan)
         if not has_cuts:
             return self._track_single_shot(frames, point)
         return self._track_multi_shot(frames, point, cut_frames)  # type: ignore[arg-type]
@@ -327,10 +382,144 @@ class VideoCaptureUseCase:
             cut_frames=list(cut_frames),
         )
 
+    def _detect_shot_candidates(
+        self,
+        frames: list[np.ndarray],
+        shot_index: int,
+        first_frame_index: int,
+    ) -> "ShotCandidates":
+        """한 샷 첫 프레임에서 후보를 검출해 ShotCandidates로 묶는다(전파 없음)."""
+        candidates = self._detector.detect(frames[first_frame_index], "person")  # type: ignore[union-attr]
+        return ShotCandidates(
+            shot_index=shot_index,
+            first_frame_index=first_frame_index,
+            candidates=candidates,
+        )
+
+    def _track_with_selections(
+        self,
+        frames: list[np.ndarray],
+        point: tuple[int, int],
+        plan: "_SelectionPlan",
+    ) -> TrackResult:
+        """혼합 정책 — 선택 샷은 명시 선택점, 미선택 샷은 자동 재매칭 폴백.
+
+        선택된 샷은 detector를 무시하고 사용자 선택점으로 재추적(correction False).
+        선택 없는 샷은 기존 자동 경로(첫 샷=함수 point, 후속 샷=select_best_match).
+
+        WHY: 검증·매핑·분할은 _SelectionPlan(core 순수 함수 위임)이 미리 끝내므로
+             이 메서드는 샷 순회·디스패치만 담당해 20줄 이내를 유지한다.
+        """
+        acc = _ShotAccumulator()
+        for idx, (start, end) in enumerate(plan.shots):
+            shot_frames = frames[start:end]
+            click = plan.point_for(idx, first_point=point)
+            if click is not None:
+                acc.add(*_run_shot(self._backend, shot_frames, click), needs_correction=False)
+            else:
+                self._track_auto_shot(frames[start], shot_frames, acc)
+        _raise_if_all_empty(acc.centroids)
+        return acc.to_result(plan.cut_frames)
+
+    def _track_auto_shot(
+        self,
+        first_frame: np.ndarray,
+        shot_frames: list[np.ndarray],
+        acc: "_ShotAccumulator",
+    ) -> None:
+        """미선택 후속 샷 — 자동 재매칭 폴백(통과 시 box중심, 미달 시 hold)."""
+        prev_box = _extract_prev_box(acc.masks)
+        candidates = self._detector.detect(first_frame, "person")  # type: ignore[union-attr]
+        match = (
+            select_best_match(prev_box, candidates)
+            if prev_box is not None
+            else RematchResult(best_index=-1, score=0.0, passed=False)
+        )
+        if match.passed:
+            click = _box_center(match.best_index, candidates)
+            acc.add(*_run_shot(self._backend, shot_frames, click), needs_correction=False)
+        else:
+            masks, centroids = _run_failed_shot(self._backend, shot_frames, acc.centroids)
+            acc.add(masks, centroids, needs_correction=True)
+
 
 # ---------------------------------------------------------------------------
 # 모듈 레벨 순수 헬퍼 (클래스 외부)
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _SelectionPlan:
+    """샷 분할·검증·선택 매핑을 미리 끝낸 추적 계획(불변).
+
+    WHY: 검증·매핑·분할(core 순수 함수)을 build에서 한 번에 처리해
+         _track_with_selections가 순회·디스패치만 담당하게 한다(메서드 20줄 유지).
+    """
+
+    shots: list[tuple[int, int]]
+    cut_frames: list[int]
+    point_by_shot: dict[int, tuple[int, int]]
+
+    @classmethod
+    def build(
+        cls,
+        n_frames: int,
+        cut_frames: list[int],
+        selections: "list[CutSelection]",
+    ) -> "_SelectionPlan":
+        """프레임 수·컷·선택으로 계획을 조립한다. 범위 밖 selection은 ValueError."""
+        shots = split_into_shots(n_frames, cut_frames)
+        validate_selections(selections, len(shots))
+        point_by_shot = index_selections_by_shot(selections, len(shots))
+        return cls(shots=shots, cut_frames=list(cut_frames), point_by_shot=point_by_shot)
+
+    def point_for(
+        self,
+        shot_index: int,
+        first_point: tuple[int, int],
+    ) -> tuple[int, int] | None:
+        """샷의 명시 클릭점을 반환한다(없으면 자동 폴백 신호로 None).
+
+        선택된 샷은 사용자 선택점, 미선택 첫 샷은 함수 인자 point를 쓴다.
+        미선택 후속 샷은 None — 호출부가 자동 재매칭 폴백을 타게 한다.
+        """
+        if shot_index in self.point_by_shot:
+            return self.point_by_shot[shot_index]
+        if shot_index == 0:
+            return first_point
+        return None
+
+
+class _ShotAccumulator:
+    """샷별 추적 결과(마스크·centroid·correction)를 누적하는 가변 헬퍼.
+
+    WHY: track 오케스트레이션이 3종 리스트를 병렬로 extend하면 매개변수·중복이
+         늘어난다. 누적 상태를 한 객체로 묶어 메서드를 20줄·DRY로 유지한다.
+    """
+
+    def __init__(self) -> None:
+        self.masks: list[np.ndarray] = []
+        self.centroids: list[tuple[float, float] | None] = []
+        self.corrections: list[bool] = []
+
+    def add(
+        self,
+        masks: list[np.ndarray],
+        centroids: list,
+        needs_correction: bool,
+    ) -> None:
+        """한 샷의 결과를 누적한다. correction 플래그는 샷 길이만큼 채운다."""
+        self.masks.extend(masks)
+        self.centroids.extend(centroids)
+        self.corrections.extend([needs_correction] * len(masks))
+
+    def to_result(self, cut_frames: list[int]) -> TrackResult:
+        """누적 결과를 불변 TrackResult로 변환한다."""
+        return TrackResult(
+            masks=self.masks,
+            centroids=self.centroids,
+            needs_correction=self.corrections,
+            cut_frames=list(cut_frames),
+        )
 
 def _run_shot(
     backend: VideoSegmentationBackend,
