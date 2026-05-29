@@ -47,6 +47,37 @@ _MSG_NO_CUT_SELECTION = (
     "index_selections_by_shot·validate_selections 미구현 — RED 예상"
 )
 
+# --- validate_negative_points 미구현 → 별도 격리(negative point 슬라이스 — RED) ---
+# WHY: negative point("이 점=옆 멤버는 대상 아님", SAM2 label 0) 검증 함수는 신규다.
+#      함수 자체가 없으면 negative 검증 테스트만 skip되고 기존 테스트는 통과한다.
+try:
+    from easy_capture.core.tracking.cut_selection import (
+        validate_negative_points,
+    )
+    _HAS_VALIDATE_NEGATIVES = True
+except ImportError:
+    validate_negative_points = None  # type: ignore[assignment]
+    _HAS_VALIDATE_NEGATIVES = False
+
+_MSG_NO_VALIDATE_NEGATIVES = (
+    "core/tracking/cut_selection.py에 validate_negative_points 미구현 — RED 예상"
+)
+
+# CutSelection.negative_points 필드 존재 여부 판별 — 미구현 시 negative 테스트만 skip.
+# WHY: negative_points는 신규(하위호환 default ()) 필드다. dataclasses.fields로
+#      존재를 판별해, 필드 추가 전에는 negative 테스트만 skip되고 기존은 통과한다.
+_HAS_NEGATIVES_FIELD = False
+if _HAS_CUT_SELECTION:
+    from dataclasses import fields as _dc_fields_neg
+
+    _HAS_NEGATIVES_FIELD = any(
+        f.name == "negative_points" for f in _dc_fields_neg(CutSelection)
+    )
+
+_MSG_NO_NEGATIVES_FIELD = (
+    "CutSelection.negative_points 필드 미구현 — negative point RED 예상"
+)
+
 # ---------------------------------------------------------------------------
 # 테스트 상수 (매직넘버 금지)
 # ---------------------------------------------------------------------------
@@ -72,6 +103,22 @@ SHOT_NEGATIVE = -1
 #      선택 대상의 전신 bbox(box)를 함께 보관해야 한다(Story D).
 BOX_A = (100.0, 50.0, 200.0, 300.0)
 BOX_B = (300.0, 80.0, 380.0, 320.0)
+
+# negative point 좌표 (x, y) — "이 점=옆 멤버는 대상 아님"(SAM2 label 0).
+# WHY: 군무 밀착 구간에서 box+positive만으론 대상+옆사람이 한 덩어리로 합쳐진다.
+#      negative point로 옆사람 경계를 가른다(Story A — negative point 슬라이스).
+NEG_POINT_A = (250, 200)   # 옆 멤버(우측) 위치
+NEG_POINT_B = (420, 60)    # 다른 옆 멤버(좌상단) 위치
+
+# 프레임 크기 (W, H) — negative 좌표 범위 검증 기준
+FRAME_W = 640
+FRAME_H = 360
+FRAME_SIZE = (FRAME_W, FRAME_H)
+
+# 프레임 밖 negative 좌표(0<=x<W, 0<=y<H 위반) — 범위 검증용
+NEG_OUT_X = (FRAME_W, 100)       # x == W → 위반(x < W 아님)
+NEG_OUT_Y = (100, FRAME_H + 5)   # y >= H → 위반
+NEG_NEGATIVE_COORD = (-1, 50)    # 음수 좌표 → 위반
 
 # CutSelection.box 필드 존재 여부 판별 — 미구현 시 box 테스트만 skip(무회귀 격리).
 # WHY: box 필드는 신규(하위호환 default None)다. dataclasses.fields로 존재를
@@ -471,3 +518,300 @@ class TestValidateSelections:
 
         with pytest.raises(ValueError, match="중복"):
             validate_selections(selections, N_SHOTS_3)
+
+
+# ===========================================================================
+# Story A: CutSelection.negative_points — negative point 필드 (하위호환 default ())
+# ===========================================================================
+class TestCutSelectionNegativePointsField:
+    """CutSelection.negative_points: 옆 멤버를 '대상 아님'으로 표시하는 신규 필드.
+
+    배경:
+      군무 밀착 구간에서 box+positive(point)만으로는 대상+옆사람이 맞닿은 한
+      덩어리로 합쳐져 마스크가 부정확하다. negative point("이 점=옆 멤버는
+      대상 아님", SAM2 label 0)로 경계를 가른다. CutSelection이 그 negative
+      좌표 묶음을 함께 보관하되, 기존 (shot_index, point[, box]) 생성 코드는
+      절대 깨지면 안 되므로 default ()로 하위호환을 보장한다(빈 튜플=negative 없음).
+    """
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    def test_negative_points를_생략하면_기본값이_빈_튜플이다(self):
+        """Given: shot_index·point만 지정(negative_points 생략)
+        When:  CutSelection 생성
+        Then:  .negative_points == () (빈 튜플)
+
+        WHY: negative_points는 하위호환을 위해 default ()여야 한다. 기존
+             CutSelection(shot_index, point) 호출이 필드 추가로 깨지면 안 된다.
+        """
+        selection = CutSelection(shot_index=SHOT_0, point=POINT_A)
+
+        assert selection.negative_points == ()
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    def test_기존_shot_index_point_box_생성이_negative_필드_추가로_깨지지_않는다(self):
+        """Given: 기존 방식대로 shot_index·point·box만 지정
+        When:  CutSelection 생성
+        Then:  예외 없이 생성되고 .negative_points == ()
+
+        WHY: negative_points 필드는 box 다음에 추가되어도 기존 (shot_index,
+             point, box) 위치 인자/키워드 인자 생성 코드를 깨면 안 된다(무회귀).
+        """
+        selection = CutSelection(shot_index=SHOT_0, point=POINT_A, box=BOX_A)
+
+        assert selection.negative_points == ()
+        assert selection.box == BOX_A
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    def test_negative_points를_지정하면_그대로_보관한다(self):
+        """Given: shot_index·point·negative_points=(옆멤버1, 옆멤버2)
+        When:  CutSelection 생성
+        Then:  .negative_points == ((250, 200), (420, 60)) 그대로 보관
+
+        WHY: negative point 경로가 옆 멤버 좌표(label 0)를 SAM2에 그대로 전달
+             할 수 있도록 (x, y) 튜플의 묶음을 보관해야 한다.
+        """
+        negatives = (NEG_POINT_A, NEG_POINT_B)
+
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=negatives
+        )
+
+        assert selection.negative_points == negatives
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    def test_negative_points_지정_시에도_frozen이라_수정하면_예외가_발생한다(self):
+        """Given: negative_points를 지정한 CutSelection 인스턴스
+        When:  negative_points 필드 수정 시도
+        Then:  FrozenInstanceError(또는 AttributeError) 발생
+
+        WHY: negative_points도 frozen 불변식에 포함돼 사용자 선택이 실수로
+             덮어씌워지는 버그를 차단한다(shot_index·point·box 패턴 계승).
+        """
+        from dataclasses import FrozenInstanceError
+
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(NEG_POINT_A,)
+        )
+
+        with pytest.raises((FrozenInstanceError, AttributeError)):
+            selection.negative_points = (NEG_POINT_B,)  # type: ignore[misc]
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    def test_negative_points가_다르면_CutSelection은_동등하지_않다(self):
+        """Given: shot_index·point는 같고 negative_points만 다른 두 인스턴스
+        When:  == 비교
+        Then:  비동등(False)
+
+        WHY: negative_points도 값 동등성(eq)에 포함돼야 옆 멤버 표시가 바뀐
+             선택을 별개로 취급한다(캐시·중복 검출 정확성).
+        """
+        a = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(NEG_POINT_A,)
+        )
+        b = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(NEG_POINT_B,)
+        )
+
+        assert a != b
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    def test_negative_생략_생성과_빈_튜플_명시_생성은_동등하다(self):
+        """Given: negative_points 생략 인스턴스와 negative_points=() 명시 인스턴스
+        When:  == 비교
+        Then:  동등(True)
+
+        WHY: 하위호환 default ()가 명시 ()와 동일하게 취급돼야 기존 코드가
+             만든 인스턴스와 신규 코드가 만든 인스턴스가 일치한다.
+        """
+        omitted = CutSelection(shot_index=SHOT_1, point=POINT_B)
+        explicit_empty = CutSelection(
+            shot_index=SHOT_1, point=POINT_B, negative_points=()
+        )
+
+        assert omitted == explicit_empty
+
+
+# ===========================================================================
+# Story A: validate_negative_points — negative 좌표 검증(순수, 한국어 ValueError)
+# ===========================================================================
+class TestValidateNegativePoints:
+    """validate_negative_points: 프레임 밖·positive 동일좌표를 한국어 ValueError로 차단.
+
+    계약(RED):
+      validate_negative_points(selection, frame_size) -> None
+        - 빈 negatives → 통과(예외 없음).
+        - 모든 negative가 프레임 안(0<=x<w, 0<=y<h) + positive(point)와 다름 → 통과.
+        - negative 좌표가 프레임 밖 → 한국어 ValueError.
+        - negative 좌표가 positive(point)와 동일 → 한국어 ValueError(무의미 클릭).
+      순수 — torch/PySide6 미import(기존 _cut_selection_keeps_pure 가드로 커버).
+    """
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_빈_negatives면_예외없이_통과한다(self):
+        """Given: negative_points=() 인 selection, frame_size=(640, 360)
+        When:  validate_negative_points 호출
+        Then:  예외 없이 통과(None 반환)
+
+        WHY: negative point는 선택 사항이다. 없으면(빈 튜플) 검증을 통과시켜야
+             기존 box+positive만 쓰는 경로가 막히지 않는다(무회귀).
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=()
+        )
+
+        result = validate_negative_points(selection, FRAME_SIZE)
+
+        assert result is None
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_프레임_안_negatives면_예외없이_통과한다(self):
+        """Given: 프레임 안(0<=x<640, 0<=y<360) negative 2개, positive와 다름
+        When:  validate_negative_points 호출
+        Then:  예외 없이 통과(None 반환)
+
+        WHY: 정상 negative 좌표는 통과시켜야 한다 — 검증이 정상 흐름을 막으면 안 된다.
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0,
+            point=POINT_A,
+            negative_points=(NEG_POINT_A, NEG_POINT_B),
+        )
+
+        result = validate_negative_points(selection, FRAME_SIZE)
+
+        assert result is None
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_negative_x가_프레임_너비_이상이면_ValueError가_발생한다(self):
+        """Given: negative_points=((640, 100),) — x == W(640) 위반(x < W 아님)
+        When:  validate_negative_points 호출
+        Then:  ValueError 발생
+
+        WHY: 프레임 밖 negative 좌표는 SAM2에 무의미하고 좌표계 오류를 유발한다.
+             x < w 상한을 명시적으로 검증한다(0-기반 인덱스 경계).
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(NEG_OUT_X,)
+        )
+
+        with pytest.raises(ValueError):
+            validate_negative_points(selection, FRAME_SIZE)
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_negative_y가_프레임_높이_이상이면_ValueError가_발생한다(self):
+        """Given: negative_points=((100, 365),) — y >= H(360) 위반
+        When:  validate_negative_points 호출
+        Then:  ValueError 발생
+
+        WHY: y 축도 0<=y<h 범위를 벗어나면 프레임 밖이다. x와 대칭으로 검증한다.
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(NEG_OUT_Y,)
+        )
+
+        with pytest.raises(ValueError):
+            validate_negative_points(selection, FRAME_SIZE)
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_negative_좌표가_음수이면_ValueError가_발생한다(self):
+        """Given: negative_points=((-1, 50),) — x 음수(0<=x 위반)
+        When:  validate_negative_points 호출
+        Then:  ValueError 발생
+
+        WHY: 음수 좌표는 numpy에서 뒤에서부터 접근해 조용한 버그가 된다.
+             0 하한도 명시적으로 검증한다(positive 검증과 동형).
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0,
+            point=POINT_A,
+            negative_points=(NEG_NEGATIVE_COORD,),
+        )
+
+        with pytest.raises(ValueError):
+            validate_negative_points(selection, FRAME_SIZE)
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_프레임_밖_ValueError_메시지는_한국어를_포함한다(self):
+        """Given: 프레임 밖 negative 좌표
+        When:  validate_negative_points 호출 → ValueError
+        Then:  메시지에 한국어 안내('프레임' 또는 '벗어')가 포함된다
+
+        WHY: 사용자 대면 에러는 한국어여야 한다(글로벌 지침). 어떤 negative
+             좌표가 프레임을 벗어났는지 한국어로 안내해야 UI 표시가 가능하다.
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(NEG_OUT_X,)
+        )
+
+        with pytest.raises(ValueError, match="프레임|벗어"):
+            validate_negative_points(selection, FRAME_SIZE)
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_negative가_positive와_동일_좌표이면_ValueError가_발생한다(self):
+        """Given: negative_points=(POINT_A,) — positive(point)와 동일 좌표
+        When:  validate_negative_points 호출
+        Then:  ValueError 발생
+
+        WHY: 같은 점을 동시에 '대상(positive)'이자 '대상 아님(negative)'으로
+             지정하면 모순이다. SAM2에 무의미·충돌하는 입력이므로 차단한다.
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(POINT_A,)
+        )
+
+        with pytest.raises(ValueError):
+            validate_negative_points(selection, FRAME_SIZE)
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_NEGATIVES_FIELD, reason=_MSG_NO_NEGATIVES_FIELD)
+    @pytest.mark.skipif(
+        not _HAS_VALIDATE_NEGATIVES, reason=_MSG_NO_VALIDATE_NEGATIVES
+    )
+    def test_positive와_동일_좌표_ValueError_메시지는_한국어를_포함한다(self):
+        """Given: positive와 동일한 negative 좌표
+        When:  validate_negative_points 호출 → ValueError
+        Then:  메시지에 한국어 안내('동일' 또는 '같')가 포함된다
+
+        WHY: 사용자가 대상 클릭과 같은 점을 negative로 찍었음을 한국어로
+             명확히 안내해 모순 입력을 정정하게 한다.
+        """
+        selection = CutSelection(
+            shot_index=SHOT_0, point=POINT_A, negative_points=(POINT_A,)
+        )
+
+        with pytest.raises(ValueError, match="동일|같"):
+            validate_negative_points(selection, FRAME_SIZE)

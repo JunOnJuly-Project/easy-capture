@@ -2997,3 +2997,164 @@ class TestStory4GifClampWarning:
             f"클램프 인덱스 수({len(clamped_indices)}) != 전체 프레임 수({_N_FAST}). "
             "전 프레임 4배속 → 전 프레임 클램프 예상."
         )
+
+
+
+
+# ===========================================================================
+# Story C: largest_component 제거 — _propagate_refined가 정제를 안 한다
+# ===========================================================================
+# 배경:
+#   largest_component(순수 BFS)는 720p 440ms/frame로 치명적으로 느리고
+#   (2.3→0.7fps), 연결이 합쳐진 군무 밀착 구간은 분리하지도 못해 효과가
+#   제한적이다. 그래서 _propagate_refined에서 largest_component를 제거한다.
+#   그 대신 negative point로 경계를 가른다(별도 Story).
+#
+# 테스트 대상:
+#   _propagate_refined(backend, session) — 모듈 레벨 순수 헬퍼.
+#   _run_shot/_run_shot_box/_run_failed_shot이 이 함수를 통해 마스크를 얻는다.
+#   largest_component 제거 대상이 바로 이 함수다.
+#
+# RED->GREEN:
+#   현재 _propagate_refined가
+#     masks = [largest_component(m) for m in backend.propagate(session)]
+#   로 각 프레임 마스크에 정제를 적용한다. 작은 떨어진 파편이 제거된다.
+#   "정제 안 됨" 단언이 실패 = RED.
+#   largest_component 라인 제거 후 propagate 결과 그대로 반환 = GREEN.
+
+# --- _propagate_refined 임포트 격리 ---
+try:
+    from easy_capture.app.video_capture import _propagate_refined
+    _HAS_PROPAGATE_REFINED = True
+except ImportError:
+    _propagate_refined = None  # type: ignore[assignment]
+    _HAS_PROPAGATE_REFINED = False
+
+_MSG_NO_PROPAGATE_REFINED = (
+    "easy_capture.app.video_capture._propagate_refined 미구현 — RED 예상"
+)
+
+# 2덩어리 합성 마스크 상수 (FAKE_FRAME 크기 안에서 결정적)
+_TWO_BLOB_FRAME_COUNT = 3
+_BIG_BLOB_ROWS = slice(100, 160)
+_BIG_BLOB_COLS = slice(100, 150)
+_BIG_BLOB_AREA = 60 * 50           # 3000
+_SMALL_BLOB_ROWS = slice(200, 210)
+_SMALL_BLOB_COLS = slice(300, 305)
+_SMALL_BLOB_AREA = 10 * 5          # 50
+_TWO_BLOB_TOTAL_AREA = _BIG_BLOB_AREA + _SMALL_BLOB_AREA  # 3050
+
+
+def _make_two_blob_mask() -> np.ndarray:
+    """큰 주체 덩어리 + 작은 떨어진 파편(4-연결 분리) bool HxW 마스크를 반환한다.
+
+    WHY: largest_component 적용 시 파편이 제거(3000px), 미적용 시 그대로(3050px).
+         두 상태를 면적/픽셀 단언으로 결정적으로 구분하기 위해 두 덩어리를 넣는다.
+    """
+    mask = np.zeros((FAKE_FRAME_H, FAKE_FRAME_W), dtype=bool)
+    mask[_BIG_BLOB_ROWS, _BIG_BLOB_COLS] = True
+    mask[_SMALL_BLOB_ROWS, _SMALL_BLOB_COLS] = True
+    return mask
+
+
+class TestLargestComponentRemoved:
+    """_propagate_refined가 backend.propagate 결과를 largest_component 없이 반환.
+
+    RED(현재): _propagate_refined가 [largest_component(m) for m ...]를 적용
+               -> 파편 제거 -> 단언 실패.
+    GREEN(목표): largest_component 라인 제거 -> propagate 결과 그대로 반환.
+    """
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(
+        not _HAS_PROPAGATE_REFINED, reason=_MSG_NO_PROPAGATE_REFINED
+    )
+    def test_propagate_refined_두덩어리를_정제없이_그대로_반환한다(self, monkeypatch):
+        """Given: backend.propagate가 큰 덩어리+작은 떨어진 파편 2덩어리를 반환
+        When:  _propagate_refined(backend, session) 직접 호출
+        Then:  반환된 masks의 True 픽셀 수 == 2덩어리 합산 면적(3050)
+
+        WHY: largest_component 적용 시 작은 파편(50px)이 제거돼 3000px만 남는다.
+             제거(미정제)되면 3050px이 그대로 유지된다. 면적 합으로 정제 여부를
+             결정적으로 단언한다.
+             현재는 _propagate_refined가 largest_component를 적용 중이라 RED.
+             largest_component 라인 제거 후 GREEN.
+        """
+        backend = FakeVideoBackend(drift=(0, 0))
+        frames = _make_frames(_TWO_BLOB_FRAME_COUNT)
+        session = backend.init_session(frames)
+        backend.add_click(session, (CLICK_X, CLICK_Y))
+        two_blob_masks = [_make_two_blob_mask() for _ in range(_TWO_BLOB_FRAME_COUNT)]
+        monkeypatch.setattr(backend, "propagate", lambda s: two_blob_masks)
+
+        masks, _ = _propagate_refined(backend, session)
+
+        for i, mask in enumerate(masks):
+            assert int(mask.sum()) == _TWO_BLOB_TOTAL_AREA, (
+                f"프레임 {i} True 픽셀 수 {int(mask.sum())} != "
+                f"{_TWO_BLOB_TOTAL_AREA}(2덩어리 합산). "
+                "_propagate_refined가 largest_component를 아직 적용 중(제거 대상)."
+            )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(
+        not _HAS_PROPAGATE_REFINED, reason=_MSG_NO_PROPAGATE_REFINED
+    )
+    def test_propagate_refined_작은_파편이_제거되지_않고_남아있다(self, monkeypatch):
+        """Given: 큰 덩어리+작은 파편 2덩어리 propagate 결과
+        When:  _propagate_refined 직접 호출
+        Then:  반환 masks[0]의 작은 파편 영역이 True로 보존됨
+
+        WHY: largest_component는 가장 큰 성분만 남기고 파편을 제거한다.
+             제거 후에는 작은 파편 영역이 그대로 남아야 한다.
+             현재는 파편이 제거돼 RED, largest_component 라인 제거 후 GREEN.
+        """
+        backend = FakeVideoBackend(drift=(0, 0))
+        frames = _make_frames(_TWO_BLOB_FRAME_COUNT)
+        session = backend.init_session(frames)
+        backend.add_click(session, (CLICK_X, CLICK_Y))
+        two_blob_masks = [_make_two_blob_mask() for _ in range(_TWO_BLOB_FRAME_COUNT)]
+        monkeypatch.setattr(backend, "propagate", lambda s: two_blob_masks)
+
+        masks, _ = _propagate_refined(backend, session)
+
+        assert masks[0][_SMALL_BLOB_ROWS, _SMALL_BLOB_COLS].all(), (
+            "작은 파편 영역이 보존되지 않았다 — "
+            "_propagate_refined가 largest_component를 아직 적용 중(제거 대상)."
+        )
+
+    @pytest.mark.skipif(not _HAS_VIDEO_USECASE, reason=_MSG_NOT_IMPL)
+    @pytest.mark.skipif(
+        not _HAS_PROPAGATE_REFINED, reason=_MSG_NO_PROPAGATE_REFINED
+    )
+    def test_propagate_refined_centroid가_2덩어리_전체_무게중심과_일치한다(
+        self, monkeypatch
+    ):
+        """Given: 2덩어리 propagate 결과
+        When:  _propagate_refined 직접 호출
+        Then:  centroids[0] == centroid_of_mask(정제 안 한 2덩어리 마스크)
+
+        WHY: centroid는 반환된 마스크 기준으로 계산된다. largest_component를
+             제거하면 centroid가 2덩어리 전체 무게중심과 일치해야 한다.
+             현재는 큰 덩어리만의 centroid라 2덩어리 무게중심과 어긋나 RED.
+             largest_component 라인 제거 후 GREEN.
+        """
+        from easy_capture.core.crop import centroid_of_mask
+
+        backend = FakeVideoBackend(drift=(0, 0))
+        frames = _make_frames(_TWO_BLOB_FRAME_COUNT)
+        session = backend.init_session(frames)
+        backend.add_click(session, (CLICK_X, CLICK_Y))
+        raw_mask = _make_two_blob_mask()
+        two_blob_masks = [raw_mask for _ in range(_TWO_BLOB_FRAME_COUNT)]
+        monkeypatch.setattr(backend, "propagate", lambda s: two_blob_masks)
+        expected_centroid = centroid_of_mask(raw_mask)
+
+        _, centroids = _propagate_refined(backend, session)
+
+        assert centroids[0] == expected_centroid, (
+            f"centroid 불일치: {centroids[0]} vs "
+            f"{expected_centroid}(2덩어리 무게중심). "
+            "_propagate_refined의 largest_component가 centroid를 큰 덩어리 쪽으로 "
+            "치우치게 하는 것으로 보인다(제거 대상)."
+        )

@@ -34,6 +34,17 @@ FakeDetectionBackend   — DetectionBackend Protocol 준수. torch/transformers 
          중심점 변환(_box_center) 대신 detect best box를 add_box로 전달하는지
          add_box_call_count 스파이로 단언한다. box 경로는 box 영역 사각형을
          그대로 마스크로 반환해 결정적(centroid·bbox 예측 가능)이다.
+  - FakeVideoBackend.add_box/add_click negatives 인자 + negatives 스파이
+    (negative point 슬라이스 — negative point 경로).
+    WHY: 군무 밀착 구간에서 box+positive만으론 대상+옆사람이 한 덩어리로 합쳐진다.
+         negative point("이 점=옆 멤버는 대상 아님", SAM2 label 0)로 경계를 가른다.
+         transformers 검증상 box+positive+negative는 SAM2 1회 호출로 조립
+         (input_boxes+input_points+input_labels, clear_old_inputs=True)되므로
+         Protocol은 별도 메서드가 아니라 add_box/add_click에 negatives 인자를 추가한다.
+         add_box(session, box, negatives=())·add_click(session, point, negatives=())로
+         확장하고, app이 그 샷의 negative 좌표를 backend로 정확히 전달하는지를
+         add_negative_call_count·last_negatives 스파이로 단언한다. negatives는
+         카운터/기록만 — propagate 마스크 생성엔 영향을 주지 않아도 된다(가드 전용).
 """
 from __future__ import annotations
 
@@ -349,12 +360,20 @@ class FakeVideoBackend:
         init_call_count     — init_session 호출 횟수
         add_click_call_count — add_click 호출 횟수
         add_box_call_count   — add_box 호출 횟수 (box 프롬프트 경로)
+        add_negative_call_count — add_box/add_click이 비어있지 않은 negatives를
+            받아 등록한 횟수 (negative point 경로)
+        last_negatives      — 마지막 add_box/add_click 호출이 받은 negatives 튜플
+            (negative 미지정 호출은 () 로 기록 → 무회귀 단언용)
         propagate_call_count — propagate 호출 횟수
         WHY: track 1회 후 compute_boxes를 여러 번 호출해도
              propagate_call_count == 1 임을 단언해 재추적 없음을 강제한다.
              이미지 모드 segment_call_count 가드의 비디오판.
              add_box_call_count: app이 자동 재매칭 통과 샷에서 중심점 변환 대신
              detect best box를 add_box로 넘기는지 단언하는 box 프롬프트 가드.
+             add_negative_call_count·last_negatives: app이 그 샷의 negative
+             좌표(옆 멤버, label 0)를 add_box/add_click의 negatives 인자로
+             정확히 전달하는지 단언하는 negative point 가드. negatives 미지정
+             경로는 last_negatives==()로 남아 기존 box/point 경로 무회귀를 보장한다.
     """
 
     device: str = "cpu"
@@ -376,6 +395,12 @@ class FakeVideoBackend:
         self.add_click_call_count: int = 0
         self.add_box_call_count: int = 0
         self.propagate_call_count: int = 0
+        # negative point 스파이 — 비어있지 않은 negatives 등록 횟수와 마지막 값
+        # WHY: add_box/add_click이 받은 negative 좌표를 기록해, app이 그 샷의
+        #      negative를 정확히 전달하는지 단언한다. 초기 last_negatives=()는
+        #      "아직 negative 미수신" 상태(무회귀 기본값)를 나타낸다.
+        self.add_negative_call_count: int = 0
+        self.last_negatives: tuple = ()
 
     def init_session(self, frames: list[np.ndarray]) -> _FakeSession:
         """구간 프레임 시퀀스로 세션을 초기화하고 반환한다.
@@ -388,33 +413,66 @@ class FakeVideoBackend:
         self.init_call_count += 1
         return _FakeSession(frames=frames)
 
-    def add_click(self, session: _FakeSession, point: tuple[int, int]) -> None:
-        """첫 프레임에 전경 클릭 포인트를 등록한다.
+    def add_click(
+        self,
+        session: _FakeSession,
+        point: tuple[int, int],
+        negatives: "Sequence[tuple[int, int]]" = (),
+    ) -> None:
+        """첫 프레임에 전경 클릭 포인트(+선택적 negative 좌표)를 등록한다.
 
-        Given: _FakeSession 인스턴스, (x, y) 클릭 좌표
+        Given: _FakeSession 인스턴스, (x, y) 클릭 좌표, 선택적 negatives
         When:  add_click 호출
-        Then:  session.click_point에 저장, add_click_call_count +1
+        Then:  session.click_point에 저장, add_click_call_count +1.
+               negatives는 항상 last_negatives에 기록(빈 튜플 포함),
+               비어있지 않으면 add_negative_call_count +1.
+
+        WHY: transformers 검증상 box+positive+negative는 SAM2 1회 호출로
+             조립되므로 별도 메서드가 아니라 add_click에 negatives 인자를 받는다.
+             negatives는 카운터/기록만 — propagate 마스크 생성엔 영향 없어도 된다.
+             label 0(negative)으로 옆 멤버를 '대상 아님'으로 표시하는 입력을 모사한다.
         """
         self.add_click_call_count += 1
         session.click_point = point
+        self._record_negatives(negatives)
 
     def add_box(
         self,
         session: _FakeSession,
         box: tuple[float, float, float, float],
+        negatives: "Sequence[tuple[int, int]]" = (),
     ) -> None:
-        """첫 프레임에 전경 box 프롬프트(x1, y1, x2, y2)를 등록한다.
+        """첫 프레임에 전경 box 프롬프트(+선택적 negative 좌표)를 등록한다.
 
-        Given: _FakeSession 인스턴스, (x1, y1, x2, y2) box 좌표
+        Given: _FakeSession 인스턴스, (x1, y1, x2, y2) box 좌표, 선택적 negatives
         When:  add_box 호출
-        Then:  session.box에 저장, add_box_call_count +1
+        Then:  session.box에 저장, add_box_call_count +1.
+               negatives는 항상 last_negatives에 기록(빈 튜플 포함),
+               비어있지 않으면 add_negative_call_count +1.
 
         WHY: PoC가 쓰던 box 프롬프트(detect 전신 bbox→SAM2)를 더블로 흉내 낸다.
              propagate에서 box가 등록돼 있으면 box 영역 사각형을 마스크로 반환해
              '중심점 1개(point)'보다 정확한 전신 마스크를 결정적으로 모사한다.
+             negatives는 box+positive와 함께 SAM2 1회 호출로 조립되는 label 0
+             입력을 모사한다(군무 밀착 구간 옆 멤버 경계 분리).
         """
         self.add_box_call_count += 1
         session.box = box
+        self._record_negatives(negatives)
+
+    def _record_negatives(
+        self,
+        negatives: "Sequence[tuple[int, int]]",
+    ) -> None:
+        """negatives를 last_negatives에 기록하고, 비어있지 않으면 카운터를 올린다.
+
+        WHY: add_box/add_click 양쪽이 동일한 스파이 기록 로직을 공유하도록 추출(DRY).
+             빈 입력도 last_negatives에 ()로 남겨 "negative 미전달"을 명시 단언할 수 있다.
+        """
+        recorded = tuple(negatives)
+        self.last_negatives = recorded
+        if recorded:
+            self.add_negative_call_count += 1
 
     def propagate(self, session: _FakeSession) -> list[np.ndarray]:
         """세션을 끝까지 전파해 프레임별 bool HxW 마스크 리스트를 반환한다.

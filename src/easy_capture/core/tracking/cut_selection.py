@@ -23,21 +23,26 @@ _SHOT_INDEX_MIN = 0
 class CutSelection:
     """한 샷의 추적 대상을 사용자가 명시 지정한 단위(불변).
 
-    shot_index: split_into_shots 결과의 샷 인덱스(0-기반).
-    point:      사용자가 클릭한 좌표 (x, y) — SAM2 재초기화 add_click 입력.
-    box:        선택 대상 전신 bbox (x1, y1, x2, y2) — SAM2 box 프롬프트 입력.
-                default None(하위호환). box가 있으면 add_box 우선 디스패치한다.
+    shot_index:      split_into_shots 결과의 샷 인덱스(0-기반).
+    point:           사용자가 클릭한 좌표 (x, y) — SAM2 재초기화 add_click 입력.
+    box:             선택 대상 전신 bbox (x1, y1, x2, y2) — SAM2 box 프롬프트 입력.
+                     default None(하위호환). box가 있으면 add_box 우선 디스패치한다.
+    negative_points: 옆 멤버 좌표 묶음 ((x, y), ...) — '대상 아님'(SAM2 label 0).
+                     default ()(하위호환). 비어 있으면 negative 없이 추적한다.
 
     WHY: frozen=True로 사용자 선택이 실수로 덮어씌워지는 버그를 차단한다.
          (샷, 클릭점)을 한 단위로 묶어 매개변수 폭증을 방지한다.
          box: box 프롬프트(detect 전신 bbox→SAM2)로 중심점 1개(point)보다
          정확한 전신 마스크를 얻기 위해 전신 bbox를 함께 보관한다(Story D).
-         default None으로 기존 (shot_index, point) 생성 코드를 깨지 않는다.
+         negative_points: 군무 밀착 구간에서 box+positive만으론 대상+옆사람이 한
+         덩어리로 합쳐진다. negative point(label 0)로 옆 멤버 경계를 가른다.
+         default None/()으로 기존 (shot_index, point[, box]) 생성 코드를 깨지 않는다.
     """
 
     shot_index: int
     point: tuple[int, int]
     box: tuple[float, float, float, float] | None = None
+    negative_points: tuple[tuple[int, int], ...] = ()
 
 
 def index_selections_by_shot(
@@ -102,4 +107,54 @@ def _raise_if_duplicate(shot_index: int, seen: set[int]) -> None:
         raise ValueError(
             f"샷 인덱스 {shot_index}가 중복 선택되었습니다. "
             "한 샷에는 하나의 추적 대상만 지정할 수 있습니다."
+        )
+
+
+def validate_negative_points(
+    selection: CutSelection,
+    frame_size: tuple[int, int],
+) -> None:
+    """selection의 negative 좌표가 프레임 안이고 positive와 다른지 검증한다(순수).
+
+    위반 시 한국어 ValueError를 발생시킨다. 빈 negatives는 통과(무회귀).
+
+    Args:
+        selection:  검증할 사용자 선택(negative_points·point 포함).
+        frame_size: 프레임 크기 (W, H) — 유효 범위는 0 <= x < W, 0 <= y < H.
+
+    Raises:
+        ValueError: negative가 프레임 밖이거나 positive(point)와 동일 좌표일 때.
+
+    WHY: 프레임 밖 좌표는 SAM2에 무의미하고 좌표계 오류를 유발한다.
+         positive와 동일 좌표는 '대상이자 대상 아님'의 모순이므로 차단한다.
+    """
+    width, height = frame_size
+    for negative in selection.negative_points:
+        _raise_if_negative_out_of_bounds(negative, width, height)
+        _raise_if_negative_equals_positive(negative, selection.point)
+
+
+def _raise_if_negative_out_of_bounds(
+    negative: tuple[int, int],
+    width: int,
+    height: int,
+) -> None:
+    """negative 좌표가 [0, W)×[0, H) 범위를 벗어나면 한국어 ValueError 발생."""
+    x, y = negative
+    if not (_SHOT_INDEX_MIN <= x < width and _SHOT_INDEX_MIN <= y < height):
+        raise ValueError(
+            f"negative 좌표 {negative}가 프레임(0 이상 {width}×{height} 미만)을 "
+            "벗어났습니다."
+        )
+
+
+def _raise_if_negative_equals_positive(
+    negative: tuple[int, int],
+    point: tuple[int, int],
+) -> None:
+    """negative 좌표가 positive(point)와 동일하면 한국어 ValueError 발생."""
+    if tuple(negative) == tuple(point):
+        raise ValueError(
+            f"negative 좌표 {negative}가 대상 클릭점과 동일합니다. "
+            "같은 점을 대상이자 대상 아님으로 동시에 지정할 수 없습니다."
         )

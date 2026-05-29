@@ -47,12 +47,23 @@ class VideoSegmentationBackend(Protocol):
         """
         ...
 
-    def add_click(self, session: object, point: tuple[int, int]) -> None:
-        """첫 프레임(frame_idx=0)에 전경 클릭 1점을 등록한다.
+    def add_click(
+        self,
+        session: object,
+        point: tuple[int, int],
+        negatives: "tuple[tuple[int, int], ...]" = (),
+    ) -> None:
+        """첫 프레임(frame_idx=0)에 전경 클릭 1점(+선택적 negative)을 등록한다.
+
+        WHY negatives: 군무 밀착 구간에서 positive만으론 대상+옆사람이 한 덩어리로
+             합쳐진다. negative point(label 0)로 옆 멤버 경계를 가른다. transformers
+             검증상 box+positive+negative는 SAM2 1회 호출로 조립(clear_old_inputs=True)
+             되므로 별도 메서드가 아니라 negatives 인자로 받는다. default ()로 무회귀.
 
         Args:
-            session: init_session이 반환한 opaque 세션.
-            point: (x, y) 이미지 좌표계 클릭 포인트.
+            session:   init_session이 반환한 opaque 세션.
+            point:     (x, y) 이미지 좌표계 전경 클릭 포인트(label 1).
+            negatives: '대상 아님' 좌표 묶음 ((x, y), ...) — label 0(default 빈).
         """
         ...
 
@@ -60,18 +71,22 @@ class VideoSegmentationBackend(Protocol):
         self,
         session: object,
         box: tuple[float, float, float, float],
+        negatives: "tuple[tuple[int, int], ...]" = (),
     ) -> None:
-        """첫 프레임(frame_idx=0)에 전경 bbox 프롬프트를 등록한다.
+        """첫 프레임(frame_idx=0)에 전경 bbox 프롬프트(+선택적 negative)를 등록한다.
 
         WHY: PoC는 detect 전신 bbox를 SAM2 box 프롬프트로 직접 넘겨 마스크가
              정확했는데, production이 박스 중심점(point) 1개만 넘기는 방식으로
              회귀해 마스크가 부정확·과대해졌다. box 프롬프트로 복귀하기 위해
              add_click과 대칭인 별도 메서드를 추가한다(ISP/OCP — 단일샷·폴백
              point 경로는 add_click 그대로 두어 무회귀 보장, ADR 0010 메서드 분리 연장).
+        WHY negatives: box+positive+negative를 SAM2 1회 호출로 조립해 옆 멤버
+             경계를 가른다(add_click과 대칭, default ()로 무회귀).
 
         Args:
-            session: init_session이 반환한 opaque 세션.
-            box: (x1, y1, x2, y2) 이미지 좌표계 전경 bbox.
+            session:   init_session이 반환한 opaque 세션.
+            box:       (x1, y1, x2, y2) 이미지 좌표계 전경 bbox.
+            negatives: '대상 아님' 좌표 묶음 ((x, y), ...) — label 0(default 빈).
         """
         ...
 

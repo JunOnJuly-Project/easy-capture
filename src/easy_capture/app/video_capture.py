@@ -31,7 +31,6 @@ from easy_capture.core.crop import (
     smooth_centroids,
 )
 from easy_capture.core.crop.crop import ASPECT_PRESETS
-from easy_capture.core.crop.mask_refine import largest_component
 from easy_capture.core.export.video_export import (
     VideoExportConfig,
     crop_frames,
@@ -247,8 +246,11 @@ class VideoCaptureUseCase:
             and cut_frames is not None
             and len(cut_frames) > 0
         )
-        if has_cuts and selections:
-            plan = _SelectionPlan.build(len(frames), cut_frames, selections)  # type: ignore[arg-type]
+        if selections:
+            # selections가 있으면 컷 유무와 무관하게 명시 선택 경로로 위임한다.
+            # WHY: 단일 샷(cut_frames=[])에 사용자 선택(box/point+negative)이 들어와도
+            #      그 디스패치를 타야 negative point가 backend로 전달된다.
+            plan = _SelectionPlan.build(len(frames), cut_frames or [], selections)
             return self._track_with_selections(frames, point, plan)
         if not has_cuts:
             return self._track_single_shot(frames, point)
@@ -418,10 +420,11 @@ class VideoCaptureUseCase:
             shot_frames = frames[start:end]
             box = plan.box_for(idx)
             click = plan.point_for(idx, first_point=point)
+            negatives = plan.negatives_for(idx)
             if box is not None:
-                acc.add(*_run_shot_box(self._backend, shot_frames, box), needs_correction=False)
+                acc.add(*_run_shot_box(self._backend, shot_frames, box, negatives), needs_correction=False)
             elif click is not None:
-                acc.add(*_run_shot(self._backend, shot_frames, click), needs_correction=False)
+                acc.add(*_run_shot(self._backend, shot_frames, click, negatives), needs_correction=False)
             else:
                 self._track_auto_shot(frames[start], shot_frames, acc)
         _raise_if_all_empty(acc.centroids)
@@ -465,6 +468,7 @@ class _SelectionPlan:
     cut_frames: list[int]
     point_by_shot: dict[int, tuple[int, int]]
     box_by_shot: dict[int, tuple[float, float, float, float]]
+    negatives_by_shot: dict[int, tuple[tuple[int, int], ...]]
 
     @classmethod
     def build(
@@ -478,11 +482,13 @@ class _SelectionPlan:
         validate_selections(selections, len(shots))
         point_by_shot = index_selections_by_shot(selections, len(shots))
         box_by_shot = {s.shot_index: s.box for s in selections if s.box is not None}
+        negatives_by_shot = {s.shot_index: s.negative_points for s in selections}
         return cls(
             shots=shots,
             cut_frames=list(cut_frames),
             point_by_shot=point_by_shot,
             box_by_shot=box_by_shot,
+            negatives_by_shot=negatives_by_shot,
         )
 
     def box_for(
@@ -494,6 +500,18 @@ class _SelectionPlan:
         WHY: box가 있으면 중심점(point)보다 우선해 add_box 디스패치한다(box 우선 정책).
         """
         return self.box_by_shot.get(shot_index)
+
+    def negatives_for(
+        self,
+        shot_index: int,
+    ) -> tuple[tuple[int, int], ...]:
+        """샷의 negative 좌표를 반환한다(없으면 빈 튜플 — negative 없음 신호).
+
+        WHY: track 오케스트레이션이 샷 인덱스로 그 샷의 negative(옆 멤버, label 0)를
+             O(1) 조회해 add_box/add_click에 넘긴다. selection 없는 샷도 () 폴백으로
+             KeyError 없이 안전하다(자동 폴백 샷 무회귀).
+        """
+        return self.negatives_by_shot.get(shot_index, ())
 
     def point_for(
         self,
@@ -548,14 +566,16 @@ def _run_shot(
     backend: VideoSegmentationBackend,
     shot_frames: list[np.ndarray],
     point: tuple[int, int],
+    negatives: tuple[tuple[int, int], ...] = (),
 ) -> tuple[list[np.ndarray], list]:
-    """단일 샷 SAM2 init+click(point)+propagate → (정제 masks, centroids).
+    """단일 샷 SAM2 init+click(point[, negatives])+propagate → (masks, centroids).
 
     WHY: 첫 샷·미달 폴백·point 선택 모두 동일한 point 패턴이므로 헬퍼로 추출(DRY).
          box 프롬프트 경로는 _run_shot_box를 쓴다(중심점 변환 폐기).
+         negatives(label 0)는 옆 멤버 경계를 가르는 입력 — default ()로 무회귀.
     """
     session = backend.init_session(shot_frames)
-    backend.add_click(session, point)
+    backend.add_click(session, point, negatives)
     return _propagate_refined(backend, session)
 
 
@@ -563,15 +583,17 @@ def _run_shot_box(
     backend: VideoSegmentationBackend,
     shot_frames: list[np.ndarray],
     box: tuple[float, float, float, float],
+    negatives: tuple[tuple[int, int], ...] = (),
 ) -> tuple[list[np.ndarray], list]:
-    """단일 샷 SAM2 init+box 프롬프트+propagate → (정제 masks, centroids).
+    """단일 샷 SAM2 init+box(box[, negatives])+propagate → (masks, centroids).
 
     WHY: 자동 재매칭 통과 샷·box 선택 샷은 detect 전신 bbox를 그대로 SAM2 box
          프롬프트로 넘겨야 마스크가 정확하다(중심점 1개 → 전신 bbox 회귀 해결).
-         _run_shot(point)과 대칭 — propagate·정제·centroid 로직은 공유한다.
+         _run_shot(point)과 대칭 — propagate·centroid 로직은 공유한다.
+         negatives(label 0)는 box+positive와 함께 SAM2 1회 호출로 조립된다.
     """
     session = backend.init_session(shot_frames)
-    backend.add_box(session, box)
+    backend.add_box(session, box, negatives)
     return _propagate_refined(backend, session)
 
 
@@ -579,13 +601,16 @@ def _propagate_refined(
     backend: VideoSegmentationBackend,
     session: object,
 ) -> tuple[list[np.ndarray], list]:
-    """propagate 후 각 마스크에 최대 연결성분 정제를 적용해 (masks, centroids) 반환.
+    """propagate 결과를 정제 없이 그대로 (masks, centroids)로 반환한다.
 
-    WHY: box/point 어느 경로든 인접 파편(옆사람 팔)이 섞일 수 있으므로 확정
-         직후 largest_component로 본체만 남긴다(B3). bbox/centroid는 정제된
-         마스크 기준으로 계산돼 크롭이 자동 정상화된다(compute_boxes 무변경).
+    WHY 이름 유지: 호출부·테스트 계약이 _propagate_refined를 참조하므로 이름은
+         보존하되, largest_component 후처리는 철회했다(ADR 0014 갱신 → ADR 0015).
+         720p에서 440ms/frame(2.3→0.7fps)로 치명적으로 느렸고, 연결이 합쳐진 군무
+         밀착 구간은 분리하지도 못해 효과가 제한적이었다. 옆 멤버 분리는 negative
+         point(label 0)가 대체한다. bbox/centroid는 propagate 마스크 기준으로
+         계산돼 크롭이 정상화된다(compute_boxes 무변경).
     """
-    masks = [largest_component(m) for m in backend.propagate(session)]
+    masks = backend.propagate(session)
     centroids = [centroid_of_mask(m) for m in masks]
     return masks, centroids
 

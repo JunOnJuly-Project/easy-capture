@@ -75,33 +75,45 @@ class Sam2VideoBackend:
         )
         return session
 
-    def add_click(self, session: object, point: tuple[int, int]) -> None:
-        """첫 프레임(frame_idx=0)에 전경 클릭 1점을 등록한다.
+    def add_click(
+        self,
+        session: object,
+        point: tuple[int, int],
+        negatives: "tuple[tuple[int, int], ...]" = (),
+    ) -> None:
+        """첫 프레임(frame_idx=0)에 전경 클릭 1점(+선택적 negative)을 등록한다.
 
         PoC 패턴: processor.add_inputs_to_inference_session(
             session, frame_idx=0, obj_ids=1,
             input_points=[[[[x, y]]]], input_labels=[[[1]]]
         ).
 
+        WHY negatives: transformers는 input_points에 [positive..., negative...]를
+             cat하고 input_labels로 1(positive)/0(negative)를 구분한다.
+             clear_old_inputs=True라 positive+negative를 SAM2 1회 호출로 조립한다.
+             negatives=() 기본이면 input_labels=[[[1]]]로 기존 호출과 동일하다.
+
         Args:
-            session: init_session이 반환한 opaque 세션.
-            point: (x, y) 이미지 좌표계 클릭 포인트.
+            session:   init_session이 반환한 opaque 세션.
+            point:     (x, y) 이미지 좌표계 전경 클릭 포인트(label 1).
+            negatives: '대상 아님' 좌표 묶음 — label 0(default 빈).
         """
-        x, y = int(point[0]), int(point[1])
+        points, labels = _points_and_labels(point, negatives)
         self._processor.add_inputs_to_inference_session(
             session,
             frame_idx=0,
             obj_ids=1,
-            input_points=[[[[x, y]]]],
-            input_labels=[[[1]]],
+            input_points=points,
+            input_labels=labels,
         )
 
     def add_box(
         self,
         session: object,
         box: tuple[float, float, float, float],
+        negatives: "tuple[tuple[int, int], ...]" = (),
     ) -> None:
-        """첫 프레임(frame_idx=0)에 전경 bbox 프롬프트를 등록한다.
+        """첫 프레임(frame_idx=0)에 전경 bbox 프롬프트(+선택적 negative)를 등록한다.
 
         PoC(셀 7) 패턴: processor.add_inputs_to_inference_session(
             session, frame_idx=0, obj_ids=1,
@@ -112,17 +124,22 @@ class Sam2VideoBackend:
              corner-points로 변환된다. clear_old_inputs 기본 True(box 제약 충족).
              add_click과 대칭 — point 대신 detect 전신 bbox를 그대로 넘겨
              '중심점 1개'보다 정확한 전신 마스크를 얻는다(PoC 회귀 해결).
+        WHY negatives: box+positive+negative를 단일 호출로 조립한다 —
+             input_boxes는 box를, input_points/labels는 negative만(label 0) 동봉.
+             negatives=() 기본이면 input_boxes만 넘겨 기존 호출 바이트 동일.
 
         Args:
-            session: init_session이 반환한 opaque 세션.
-            box: (x1, y1, x2, y2) 이미지 좌표계 전경 bbox.
+            session:   init_session이 반환한 opaque 세션.
+            box:       (x1, y1, x2, y2) 이미지 좌표계 전경 bbox.
+            negatives: '대상 아님' 좌표 묶음 — label 0(default 빈).
         """
-        x1, y1, x2, y2 = (float(v) for v in box)
+        anchor_box, extras = _box_anchor_and_negatives(box, negatives)
         self._processor.add_inputs_to_inference_session(
             session,
             frame_idx=0,
             obj_ids=1,
-            input_boxes=[[[x1, y1, x2, y2]]],
+            input_boxes=anchor_box,
+            **extras,
         )
 
     def propagate(self, session: object) -> list[np.ndarray]:
@@ -199,6 +216,52 @@ class Sam2VideoBackend:
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
+
+# SAM2 입력 라벨 — transformers add_inputs 관례(1=전경/positive, 0=배경/negative).
+_LABEL_POSITIVE = 1
+_LABEL_NEGATIVE = 0
+
+
+def _points_and_labels(
+    point: tuple[int, int],
+    negatives: "tuple[tuple[int, int], ...]",
+) -> tuple[list, list]:
+    """positive 1점 + negative N점을 transformers input_points/labels 형식으로 조립한다.
+
+    Returns:
+        (input_points, input_labels) — [[[ [x,y], ... ]]] / [[[ 1, 0, ... ]]].
+        points와 labels의 길이는 항상 일치한다(positive 1 + negatives N).
+
+    WHY: transformers는 한 obj의 점들을 [positive..., negative...]로 cat하고
+         label 1/0으로 구분한다. positive를 먼저, negative를 뒤에 둔다.
+    """
+    px, py = int(point[0]), int(point[1])
+    coords = [[px, py]] + [[int(nx), int(ny)] for nx, ny in negatives]
+    labels = [_LABEL_POSITIVE] + [_LABEL_NEGATIVE] * len(negatives)
+    return [[coords]], [[labels]]
+
+
+def _box_anchor_and_negatives(
+    box: tuple[float, float, float, float],
+    negatives: "tuple[tuple[int, int], ...]",
+) -> tuple[list, dict]:
+    """box를 input_boxes로, negatives만 input_points/labels(label 0)로 조립한다.
+
+    Returns:
+        (input_boxes, extras) — extras는 negatives가 있을 때만 input_points/labels
+        키를 담고, 빈 negatives면 빈 dict(기존 box 호출 바이트 동일).
+
+    WHY: box+negative는 box를 input_boxes로 두고 negative는 label 0 점으로 동봉해
+         SAM2 1회 호출로 조립한다. negatives 없으면 input_boxes만 넘긴다(무회귀).
+    """
+    x1, y1, x2, y2 = (float(v) for v in box)
+    anchor_box = [[[x1, y1, x2, y2]]]
+    if not negatives:
+        return anchor_box, {}
+    coords = [[int(nx), int(ny)] for nx, ny in negatives]
+    labels = [_LABEL_NEGATIVE] * len(negatives)
+    return anchor_box, {"input_points": [[coords]], "input_labels": [[labels]]}
+
 
 def _pred_mask_hw(out) -> tuple[int, int]:
     """pred_masks shape에서 (H, W)를 추출하는 폴백 헬퍼.
