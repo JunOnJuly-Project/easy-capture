@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-29 (마스크 정제 — SAM2 box 프롬프트 + largest_component, 561 테스트. **다음: Colab 게이트 — box vs point 마스크 정확도·유지율·후처리 시간**)
+> 최종 업데이트: 2026-05-29 (negative point(옆 멤버 배제) + largest_component 철회, 588 테스트. **다음: Colab 게이트 — box+negative 밀착 분리 + 2.3fps 복구**)
 
 ---
 
@@ -47,7 +47,7 @@ python -m easy_capture                    # 시작 화면(모드 선택)
 ### 2-4. 동작 확인 (smoke test)
 
 ```bash
-.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 561개)
+.venv\Scripts\pytest -q     # 순수 로직 단위 테스트 (현재 588개)
 ```
 
 GPU 비디오 추적 검증은 `poc/colab/` 노트북(Colab GPU).
@@ -104,15 +104,16 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 - 🎬 **슬로우모션 6 Story**(core `timing/timeremap`·GIF per-frame duration·MP4 프레임복제·export·UI 구간테이블·노트북, ADR 0013)
 - ✂️ **트림+슬로우+루프**(출력 구간 트림·GIF loop_count, ADR 0013 보강)
 - 🎯 **수동 교정 = 컷별 오브젝트 선택**(core `CutSelection`·app `detect_cut_candidates`/`track(selections=)`·노트북, ADR 0006 보강) — needs_correction **자동 248→49**(detect 마침표 버그 수정)·**컷별 선택 0**
-- 🎭 **마스크 정제 = SAM2 box 프롬프트(`add_box`) + `largest_component`**(ADR 0014, 0010 연계)
-- 🟢 **비디오 GPU 실검증**(단일샷 AC-01 100%, 멀티샷 92%) — GPU 블로커 해소
+- 🎭 **마스크 정제 = SAM2 box 프롬프트(`add_box`)**(ADR 0014, 0010 연계)
+- 🚫 **negative point(옆 멤버 배제, `add_box/add_click(negatives)`) + `largest_component` 철회**(ADR 0015 — box+positive+negative 1회 조립, 효과·성능 한계로 후처리 제거) — 588 테스트
+- 🟢 **비디오 GPU 실검증**(단일샷 AC-01 100%, 멀티샷 92%·컷별 선택 needs_correction 0) — GPU 블로커 해소
 - 🔧 detect 프롬프트 기본값 일원화(`DEFAULT_DETECT_PROMPT="person."`, Protocol·infra 공유)
 
 ### 미완료 (다음 작업 순서) ⏳
-1. 🔴 **Colab box 게이트**: box 프롬프트 마스크 정확도(1인 클로즈업?)·유지율(컷별 선택 시 76%였음)·`largest_component` 후처리 시간(720p≈440ms) 측정
+1. 🔴 **Colab 게이트**(차단): box+**negative point**가 밀착 구간 마스크를 분리하는가(앞부분 "구분 안됨" 해결?)·유지율(컷별 76%였음)·**largest_component 철회 후 2.3fps 복구** 확인. 노트북 셀 7.5 `NEG_TARGETS`로 배제 후보 지정
 2. **데스크톱 컷별 선택 UI**(Story 4): 후보 클릭 선택(Colab 게이트 통과 후, GPU 환경 전제)
 3. **멀티샷 AC 정량화**: 컷별 선택 시 유지율·needs_correction 재측정 → REPORT 확정
-4. 🔴 **`largest_component` 성능**: numpy BFS 720p≈440ms/프레임, 긴 클립 100s+ → numpy 벡터화 또는 infra cv2 폴백
+4. (선택) negative point 효과 미달 시: 중간 프레임 negative 추가·tiny→small 모델 / largest_component cv2 재도입 검토(ADR 0015 대안)
 5. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
 6. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / AC-06 fp16 최적화
 
