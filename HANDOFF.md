@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-29 (Story 4 데스크톱 컷별 선택 UI 착수 — Task 4-1 core 변환 완료. **작업 브랜치 `feature/ui/cut-selection-ui`**(main 미머지). 멀티샷 GPU 게이트 통과(small·AC-01 100%) 후속)
+> 최종 업데이트: 2026-05-29 (Story 4 데스크톱 컷별 선택 UI **Task 4-2~4-6 완료** — 캔버스 박스 오버레이·컷별 선택 패널·워커 2분할(_DetectWorker/_TrackWorker selections)·모드 자동전환·ADR 0016·GPU 게이트 체크리스트. 헤드리스 673 테스트 통과. **작업 브랜치 `feature/ui/cut-selection-ui`**(main 미머지). 실 GPU 재현은 Colab 대기)
 
 ---
 
@@ -75,10 +75,13 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ### 현재 브랜치
 `main` (슬로우모션 + 트림/루프 + 수동 교정(컷별 선택) + **마스크 정제(box 프롬프트·largest_component) 머지** — 561 테스트). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). **검증됨**: 컷별 선택 needs_correction(자동만 248→49 [마침표 버그 수정 기여], 컷별 선택 0). **🟢 멀티샷 GPU 게이트 통과**(2026-05-29): hiera-small + 컷별 선택(box+negative) → 멀티샷 군무 300프레임 **AC-01 100%·needs_correction 0·2.0fps**(tiny는 재합침으로 미달 → small 필요). 다음: **데스크톱 컷별 선택 UI(Story 4, GPU 전제)** + **노트북 SAM2_REPO small 기본화**. **백로그**: AC-06 2.0fps 개선(경량 백엔드 v1.1) / CUT/FREEZE×트림(ADR 0013) / 오디오 동기.
 
-**▶ 진행 중 — 작업 브랜치 `feature/ui/cut-selection-ui`** (Story 4: 데스크톱 컷별 선택 UI. **방향 확정: GPU PC 전제 로컬 프로그램**):
+**✅ Story 4 데스크톱 컷별 선택 UI — Task 4-2~4-6 완료** (작업 브랜치 `feature/ui/cut-selection-ui`, main 미머지. **방향: GPU PC 전제 로컬 프로그램**):
 - ✅ Task 4-1(`9ed2e73`): core 변환 `box_center`·`pick_box_at`(클릭 hit-test)·`ShotChoice`·`build_selections_from_choices`(노트북 셀7.5 이식, candidate_boxes로 core→app 역참조 회피). 21테스트.
-- ⏳ 4-2 `frame_canvas` 박스 오버레이+`box_clicked`(hit-test) · 4-3 `ui/cut_selection_panel.py`(샷 네비·positive/negative·`to_choices`) · 4-4 `_DetectWorker` 신설 + **`_TrackWorker`에 `selections` 연결**(현재 미전달!) · 4-5 video_window 통합(컷 유무 모드 자동전환·"컷 감지" 버튼) · 4-6 GPU 게이트(GUI로 멀티샷 100% 재현).
-- 설계(planner): 캔버스 박스 클릭(대상 초록/배제 빨강)+패널+워커 2분할+core 변환 공유. 무회귀(단일클릭·슬로우/트림/루프·export). **ADR 0016 후보**. UI 헤드리스 테스트는 QMessageBox/QFileDialog monkeypatch 필수(hang 교훈).
+- ✅ Task 4-2(`f7aa8ec`+`208cd64`): `frame_canvas` 후보 박스 오버레이(대상 초록/배제 빨강/미선택 회색)+`box_clicked` Signal. `box_color_for` 순수 헬퍼, `_draw_boxes` 이미지 좌표계 렌더 후 mask와 함께 scaled(좌표 정합). 클릭 라우팅 상호배타(box_clicked vs clicked). 26테스트.
+- ✅ Task 4-3(`d4c1bdf`): `ui/cut_selection_panel.py` 신규 — 샷 네비·positive(라디오)/negative(체크) 상호배타 토글·`to_choices()`→`dict[int,ShotChoice]`. blockSignals 재진입 차단. 패널은 인덱스만(core 경계). 25테스트.
+- ✅ Task 4-4·4-5(`e753248`): `_DetectWorker`(detect_cuts→detect_cut_candidates, 가벼움) 신설 + **`_TrackWorker`에 `selections` 전달**(핵심 결함 수정). "컷 감지" 버튼·컷 유무 모드 자동전환·`_candidate_boxes_from`(Detection→box 경계)·`build_selections_from_choices` 배선. reviewer [중요](영상 교체 시 상태 초기화)+[제안] 3건 반영. 13테스트.
+- ✅ Task 4-6: ADR 0016(`docs/adr/0016-cut-selection-ui.md`)+GPU 게이트 GUI 재현 체크리스트(`docs/plans/cut-selection-ui-gpu-gate.md`). 동등성 7항목 코드 검증, 실 GPU(AC-01/needs_correction/fps)는 Colab 대기.
+- **전체 673 헤드리스 테스트 통과**(무회귀: 단일클릭·슬로우/트림/루프·export·mask 오버레이). reviewer 치명적 0/중요 1(해소)/제안 4. UI 테스트 QMessageBox/QFileDialog monkeypatch 필수(hang 교훈 — 신규 테스트도 적용).
 
 ### 완료 ✅
 
@@ -117,10 +120,10 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 
 ### 미완료 (다음 작업 순서) ⏳
 1. ✅ **Colab 게이트 통과 완료**(2026-05-29): hiera-small + 컷별 선택(box+negative) + 올바른 shot_index 키 → 멀티샷 군무 **AC-01 100%(300/300)·needs_correction 0·2.0fps**. tiny는 재합침으로 미달 → small 필요(ADR 0015 R1 해소), largest_component 철회로 0.7→2.0fps 복구.
-2. **데스크톱 컷별 선택 UI**(Story 4): 후보 클릭 선택(GPU 환경 전제)
+2. ✅ **데스크톱 컷별 선택 UI**(Story 4 Task 4-2~4-6 완료): 캔버스 박스 클릭 hit-test+패널 선택+워커 2분할+모드 자동전환. 헤드리스 673 테스트. **남은 것**: ① `feature/ui/cut-selection-ui` → main 머지(검토 후), ② 실 GPU GUI 재현(Colab — `docs/plans/cut-selection-ui-gpu-gate.md` 체크리스트로 AC-01 100% 재현 확인).
 3. **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경
 4. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
-5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013)
+5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(_DetectWorker except 범위 좁히기)
 
 ### 백로그
 - **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): 경량 백엔드(EdgeTAM 등) v1.1 / fp16·half / 프레임 서브샘플
