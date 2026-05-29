@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-05-29 (negative point(옆 멤버 배제) + largest_component 철회, 588 테스트. **다음: Colab 게이트 — box+negative 밀착 분리 + 2.3fps 복구**)
+> 최종 업데이트: 2026-05-29 (**🟢 멀티샷 GPU 게이트 통과** — hiera-small + 컷별 선택(box+negative) → AC-01 100%·needs_correction 0·2.0fps. **다음: 데스크톱 컷별 선택 UI(Story 4, GPU 전제) + 노트북 SAM2_REPO small 기본화**)
 
 ---
 
@@ -73,7 +73,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ## 3. 현재 진행 상태
 
 ### 현재 브랜치
-`main` (슬로우모션 + 트림/루프 + 수동 교정(컷별 선택) + **마스크 정제(box 프롬프트·largest_component) 머지** — 561 테스트). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). **검증됨**: 컷별 선택 needs_correction(자동만 248→49 [마침표 버그 수정 기여], 컷별 선택 0). 다음: 🔴 **Colab 게이트** — box 프롬프트 마스크 정확도(1인 클로즈업?)·유지율(컷별 76%였음)·largest_component 후처리 시간. **백로그**: 🔴 largest_component 성능(720p ≈440ms/프레임, 긴 클립 100s+ → numpy 벡터화 또는 infra cv2 폴백) / detect prompt 기본값 일원화(Protocol·Fake·infra 마침표 일관) / CUT/FREEZE×트림(ADR 0013) / 오디오 동기.
+`main` (슬로우모션 + 트림/루프 + 수동 교정(컷별 선택) + **마스크 정제(box 프롬프트·largest_component) 머지** — 561 테스트). **새 슬라이스는 `main`에서 분기**(선형 누적 안티패턴 중단). **검증됨**: 컷별 선택 needs_correction(자동만 248→49 [마침표 버그 수정 기여], 컷별 선택 0). **🟢 멀티샷 GPU 게이트 통과**(2026-05-29): hiera-small + 컷별 선택(box+negative) → 멀티샷 군무 300프레임 **AC-01 100%·needs_correction 0·2.0fps**(tiny는 재합침으로 미달 → small 필요). 다음: **데스크톱 컷별 선택 UI(Story 4, GPU 전제)** + **노트북 SAM2_REPO small 기본화**. **백로그**: AC-06 2.0fps 개선(경량 백엔드 v1.1) / CUT/FREEZE×트림(ADR 0013) / 오디오 동기.
 
 ### 완료 ✅
 
@@ -107,15 +107,18 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 - 🎭 **마스크 정제 = SAM2 box 프롬프트(`add_box`)**(ADR 0014, 0010 연계)
 - 🚫 **negative point(옆 멤버 배제, `add_box/add_click(negatives)`) + `largest_component` 철회**(ADR 0015 — box+positive+negative 1회 조립, 효과·성능 한계로 후처리 제거) — 588 테스트
 - 🟢 **비디오 GPU 실검증**(단일샷 AC-01 100%, 멀티샷 92%·컷별 선택 needs_correction 0) — GPU 블로커 해소
+- 🟢 **멀티샷 GPU 게이트 통과**(hiera-small + 컷별 선택 box+negative + 올바른 shot_index 키 → 멀티샷 군무 300프레임/컷6→4샷 **AC-01 100%(300/300) · needs_correction 0 · AC-06 2.0fps**) — `hiera-tiny`는 negative로도 밀착 재합침 → **small 상향이 필요**(ADR 0015 R1 해소), largest_component 철회로 0.7→2.0fps 복구
 - 🔧 detect 프롬프트 기본값 일원화(`DEFAULT_DETECT_PROMPT="person."`, Protocol·infra 공유)
 
 ### 미완료 (다음 작업 순서) ⏳
-1. 🔴 **Colab 게이트**(차단): box+**negative point**가 밀착 구간 마스크를 분리하는가(앞부분 "구분 안됨" 해결?)·유지율(컷별 76%였음)·**largest_component 철회 후 2.3fps 복구** 확인. 노트북 셀 7.5 `NEG_TARGETS`로 배제 후보 지정
-2. **데스크톱 컷별 선택 UI**(Story 4): 후보 클릭 선택(Colab 게이트 통과 후, GPU 환경 전제)
-3. **멀티샷 AC 정량화**: 컷별 선택 시 유지율·needs_correction 재측정 → REPORT 확정
-4. (선택) negative point 효과 미달 시: 중간 프레임 negative 추가·tiny→small 모델 / largest_component cv2 재도입 검토(ADR 0015 대안)
-5. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
-6. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / AC-06 fp16 최적화
+1. ✅ **Colab 게이트 통과 완료**(2026-05-29): hiera-small + 컷별 선택(box+negative) + 올바른 shot_index 키 → 멀티샷 군무 **AC-01 100%(300/300)·needs_correction 0·2.0fps**. tiny는 재합침으로 미달 → small 필요(ADR 0015 R1 해소), largest_component 철회로 0.7→2.0fps 복구.
+2. **데스크톱 컷별 선택 UI**(Story 4): 후보 클릭 선택(GPU 환경 전제)
+3. **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경
+4. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
+5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013)
+
+### 백로그
+- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): 경량 백엔드(EdgeTAM 등) v1.1 / fp16·half / 프레임 서브샘플
 
 ### 백로그(리뷰 [제안])
 - 미리보기 스크럽(prev/next), 클램프 경고 확인 다이얼로그, segment_logic 물리 분리, GIF fallback `1000/12.0`→상수화.
@@ -132,7 +135,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 
 ### 알려진 미해결 이슈 / 주의사항
 - [x] 라이선스 확정 완료 → **기본 업스케일러 SwinIR**. Real-ESRGAN 은 옵션(상업 배포 시 비활성). **libx264=GPL** → 상업 배포 시 코덱/라이선스 법무 재검토.
-- [~] SAM2 컷 재추적(ADR 0006): 코드 + CPU 테스트(280개) 완료. **멀티샷 GPU 검증 완료(2026-05-29, 컷6)** — 추적 유지 92.3%이나 **재매칭 needs_correction 82.7%·마스크 과대로 군무 품질 저하**(단일 피사체는 100% 우수). → 재매칭 threshold·마스크 정제·**수동 교정 UI**로 보완 필요(리스크 현실화).
+- [x] SAM2 컷 재추적(ADR 0006): 코드 + CPU 테스트 완료. **멀티샷 GPU 게이트 통과(2026-05-29)** — 초기 needs_correction 82.7%(detect 마침표 버그)·마스크 과대를 거쳐, **hiera-small + 컷별 선택(box+negative) + 올바른 shot_index 키로 AC-01 100%·needs_correction 0·2.0fps 달성**(군무 품질 회복). tiny는 밀착 재합침으로 미달 → small 상향이 해법(ADR 0015 R1).
 - [ ] EdgeTAM(CPU 비디오 추적 후보)·경량 백엔드는 v1.1 평가
 - [x] **[GPU 블로커 해소] 비디오 모드**: SAM2 CPU ≈0.10 fps는 유지되나 Colab GPU(T4)로 추적·슬로우·트림·루프 실검증 완료(2026-05-29). 개발/검증은 Colab GPU, 실사용 GPU 전제로 진행.
 

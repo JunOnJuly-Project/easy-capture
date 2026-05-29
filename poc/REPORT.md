@@ -36,12 +36,17 @@
 - ✅ **AC-01 92.3%**(277/300) — 추적 자체는 이어짐(목표 ≥80% 충족).
 - 🚨 **needs_correction 248프레임(82.7%)** — 초기: 컷 넘어 자동 재매칭이 대부분 threshold 0.5 미달.
 - **경과(원인 규명·해소)**: detect 프롬프트 마침표 버그 수정(`"person"`→`"person."`)으로 **자동 재매칭만으로 248→49**, 컷별 명시 선택(`CutSelection`, ADR 0006 보강) 적용 시 **needs_correction 0**. 자동 재매칭이 망가진 게 아니라 **검출 누락이 주범**이었음.
-- ⚠️ **마스크 과대** — SAM2 point(박스 중심=배)만 줘서 옆 멤버 팔·대상 배만 잡힘 → clip_crop이 넓은 영역. **대응: box 프롬프트(`add_box`) + largest_component(ADR 0014)** — Colab 게이트 검증 대기.
+- ⚠️ **마스크 과대(밀착 분리)** — SAM2 point(박스 중심=배)만 줘서 옆 멤버 팔·대상 배만 잡힘 → clip_crop이 넓은 영역. **대응 경과**: box 프롬프트(`add_box`)로 **부분 개선(뒷부분)**, 밀착 **앞부분은 미해결**. largest_component(ADR 0014, 720p ≈440ms/프레임·7분 영상 부담·효과 한계)를 **철회**하고 **negative point + small 모델**로 전환.
 - ❌ AC-06 2.3fps(동일).
-- **결론**: 단일 피사체·단일샷 우수(100%). 군무는 컷별 선택으로 needs_correction 0 달성, 마스크 정확도는 box 프롬프트 게이트 후 확정.
+- **결론**: 단일 피사체·단일샷 우수(100%). 군무는 컷별 선택으로 needs_correction 0 달성, 마스크 정확도는 negative point + 모델 상향으로 게이트 통과(아래).
+
+### ✅ 게이트 통과 — 멀티샷 군무 최종 (2026-05-29 · 300프레임 · 컷 6→4샷)
+- ✅ **게이트 통과**: `hiera-small` 모델 + 컷별 선택(box 프롬프트 + negative point) + 올바른 `shot_index` 키 → 멀티샷 군무 **AC-01 추적 유지율 100%(300/300) · needs_correction 0 · AC-06 2.0fps**.
+- **핵심 발견**: `hiera-tiny`는 negative point로도 밀착 인물 분리가 부족(전파 중 재합침). **`hiera-small`이 군무 밀착 구분에 필요**([ADR 0015](../docs/adr/0015-negative-point-prompt.md) 리스크 R1의 해법 = 모델 상향).
+- **성능 복구**: largest_component 추적 후처리 철회로 **0.7fps(7분 영상 기준) → 2.0fps**로 복구.
+- **잔여**: AC-06 2.0fps(목표 10 미달 — SAM2 비용, v1.1 경량 백엔드) / 데스크톱 컷별 선택 UI(GPU 환경 전제).
 
 ### 잔여 (추가 측정 시 확정)
-- **ADR 0014 box vs point 마스크 정확도**(1인 클로즈업?)·**유지율**(컷별 선택 시 76%였음)·**largest_component 후처리 시간**(720p ≈440ms/프레임) Colab 게이트.
 - VFR 실파일 오디오 동기(AC-08).
 
 ---

@@ -1,6 +1,6 @@
 # ADR 0015 — SAM2 negative point 프롬프트 도입 (옆 멤버 배제)
 
-- 상태: 채택 (노트북 GPU 게이트 검증 대기)
+- 상태: 채택 (2026-05-29 GPU 게이트 검증 완료 — hiera-small 전제)
 - 날짜: 2026-05-29
 
 ## 맥락
@@ -92,13 +92,15 @@ positive/negative를 구분 없이 받는 범용 `add_points(session, points, la
 
 ### 부정적 영향 / 트레이드오프 / 리스크
 
-- **전파 중 재합침 가능성**: negative point는 **첫 프레임(frame_idx=0)에만** 지정된다. 전파가 진행되며 대상과 옆 멤버가 다시 가까워지면 negative 신호 없이 재합침할 수 있다. 첫 프레임 negative만으로 전 구간 분리가 유지되는지는 **노트북 GPU 게이트에서 정량 측정**한다.
+- **리스크 R1 — 전파 중 재합침(현실화 → 모델 상향으로 해소)**: negative point는 **첫 프레임(frame_idx=0)에만** 지정된다. 전파가 진행되며 대상과 옆 멤버가 다시 가까워지면 negative 신호 없이 재합침할 수 있다는 우려가 **GPU 게이트(2026-05-29)에서 `hiera-tiny`로 현실화**됐다 — tiny는 첫 프레임 negative를 줘도 밀착 인물 분리가 부족해 **전파 중 다시 합쳐졌다**. **`hiera-small`로 모델을 상향하자 해소**됐다(멀티샷 군무 300프레임 **AC-01 100% · needs_correction 0**). 운영 전제: **negative point는 `hiera-small` 이상 모델에서 효과적**이며, `hiera-tiny`에서는 밀착 군무 분리에 불충분하다.
 - **노트북 UX 복잡도 증가**: 사용자가 positive 외에 배제할 옆 멤버(`NEG_TARGETS`)까지 컷별로 지정해야 한다. 기본은 빈 값이라 필요한 밀착 구간에서만 선택적으로 쓴다.
 - **GPU 미검증**: SAM2 video 실추론은 CI 미실행이라 box+positive+negative 1회 조립의 실제 분리 효과는 **노트북 게이트가 필수**다.
 
-### 검증 경로 (게이트)
+### 검증 경로 (게이트) — ✅ 통과 (2026-05-29)
 
-GPU 의존(track)이라 노트북(Colab) 우선 검증: 밀착 구간에서 box+positive **대비** box+positive+negative의 **분리 정확도** + 전파 중 **재합침 여부** + 추적 처리량(2.3fps 복구) 재측정이 데스크톱 적용 게이트.
+GPU 의존(track)이라 노트북(Colab/Kaggle) 우선 검증: 밀착 구간에서 box+positive **대비** box+positive+negative의 **분리 정확도** + 전파 중 **재합침 여부** + 추적 처리량 재측정이 데스크톱 적용 게이트였다.
+
+**결과**: `hiera-small` + 컷별 선택(box + negative point) + 올바른 `shot_index` 키로 멀티샷 군무(300프레임, 컷 6→4샷) **AC-01 100%(300/300) · needs_correction 0 · AC-06 2.0fps**(largest_component 철회로 0.7→2.0fps 복구). `hiera-tiny`는 재합침으로 미달 → small 상향이 게이트 통과 조건. 데스크톱 적용 시 **노트북 SAM2_REPO를 small 기본화**한다.
 
 ## 연계
 
