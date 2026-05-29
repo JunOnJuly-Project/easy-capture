@@ -351,7 +351,8 @@ class VideoCaptureUseCase:
         for start, end in shots[1:]:
             shot_frames = frames[start:end]
             prev_box = _extract_prev_box(all_masks)
-            candidates = self._detector.detect(frames[start], "person")  # type: ignore[union-attr]
+            # 기본 prompt="person." 사용 — Grounding DINO 마침표 관례(없으면 검출 누락)
+            candidates = self._detector.detect(frames[start])  # type: ignore[union-attr]
 
             if prev_box is not None:
                 match_result = select_best_match(prev_box, candidates)
@@ -389,7 +390,8 @@ class VideoCaptureUseCase:
         first_frame_index: int,
     ) -> "ShotCandidates":
         """한 샷 첫 프레임에서 후보를 검출해 ShotCandidates로 묶는다(전파 없음)."""
-        candidates = self._detector.detect(frames[first_frame_index], "person")  # type: ignore[union-attr]
+        # 기본 prompt="person." — 마침표 관례(없으면 후보 누락 → 셀 7.5 박스 안 뜸)
+        candidates = self._detector.detect(frames[first_frame_index])  # type: ignore[union-attr]
         return ShotCandidates(
             shot_index=shot_index,
             first_frame_index=first_frame_index,
@@ -429,7 +431,7 @@ class VideoCaptureUseCase:
     ) -> None:
         """미선택 후속 샷 — 자동 재매칭 폴백(통과 시 box중심, 미달 시 hold)."""
         prev_box = _extract_prev_box(acc.masks)
-        candidates = self._detector.detect(first_frame, "person")  # type: ignore[union-attr]
+        candidates = self._detector.detect(first_frame)  # type: ignore[union-attr]  # 기본 "person."
         match = (
             select_best_match(prev_box, candidates)
             if prev_box is not None
