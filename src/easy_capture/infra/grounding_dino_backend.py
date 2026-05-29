@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from easy_capture.core.segmentation.detection_backend import Detection
+from easy_capture.core.segmentation.detection_backend import Detection, DEFAULT_DETECT_PROMPT
 
 if TYPE_CHECKING:
     # 타입 힌트 전용 import — 런타임에는 지연 로드
@@ -91,7 +91,7 @@ class GroundingDinoBackend:
         self._model = self._model.to(self.device)
         self._model.eval()
 
-    def detect(self, frame: np.ndarray, prompt: str = "person.") -> list[Detection]:
+    def detect(self, frame: np.ndarray, prompt: str = DEFAULT_DETECT_PROMPT) -> list[Detection]:
         """프레임에서 prompt에 해당하는 후보들을 검출한다(무거움 — GPU 권장).
 
         PoC h2_cut_retrack.py 패턴 → transformers post_process_grounded_object_detection.

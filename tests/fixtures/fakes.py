@@ -550,7 +550,7 @@ class FakeDetectionBackend:
         # 스파이 카운터 — 초기값 0, detect 호출마다 +1
         self.detect_call_count: int = 0
 
-    def detect(self, frame: np.ndarray, prompt: str = "person") -> list:
+    def detect(self, frame: np.ndarray, prompt: str = "person.") -> list:
         """프레임에서 후보 Detection 리스트를 반환한다(결정적). 호출마다 카운터 +1.
 
         Given: RGB HxWx3 프레임, 텍스트 프롬프트(무시됨 — 결정적 반환)

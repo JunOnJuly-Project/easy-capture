@@ -19,6 +19,11 @@ import numpy as np
 # Box 타입 alias — rematch.py Box와 동일
 Box = tuple[float, float, float, float]  # (x1, y1, x2, y2)
 
+# 검출 프롬프트 기본값 단일 소스(Protocol·infra·Fake 공유).
+# WHY 마침표: Grounding DINO는 "person." 형태(끝 마침표)가 관례이고, 마침표 없는
+#            "person"은 검출 누락이 빈번하다(needs_correction 248→49 회귀의 원인, 0b6f4b9).
+DEFAULT_DETECT_PROMPT: str = "person."
+
 
 @dataclass(frozen=True)
 class Detection:
@@ -52,12 +57,13 @@ class DetectionBackend(Protocol):
 
     device: str
 
-    def detect(self, frame: np.ndarray, prompt: str) -> list[Detection]:
+    def detect(self, frame: np.ndarray, prompt: str = DEFAULT_DETECT_PROMPT) -> list[Detection]:
         """프레임에서 prompt에 해당하는 후보들을 검출한다(무거움 — GPU 권장).
 
         Args:
             frame:  RGB HxWx3 uint8 단일 프레임 (컷 직후 첫 프레임).
-            prompt: Grounding DINO 텍스트 프롬프트(기본 'person').
+            prompt: Grounding DINO 텍스트 프롬프트(기본 DEFAULT_DETECT_PROMPT='person.' —
+                    마침표 관례, 없으면 검출 누락).
 
         Returns:
             Detection 리스트(검출 없으면 빈 리스트). score 내림차순 정렬.
