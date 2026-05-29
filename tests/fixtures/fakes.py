@@ -26,6 +26,14 @@ FakeDetectionBackend   — DetectionBackend Protocol 준수. torch/transformers 
     WHY: track이 컷 경계마다 정확히 1회만 detect를 호출하는지 단언하기 위해.
          시나리오별 후보 리스트(통과/미달/다중/빈)를 주입해 결정적 검출을 흉내 낸다.
          torch/transformers 전혀 로드하지 않는다.
+  - FakeVideoBackend.add_box: VideoSegmentationBackend Protocol의 box 프롬프트 확장
+    (mask-refine 슬라이스 — box 프롬프트 경로).
+    WHY: PoC는 detect 전신 bbox를 SAM2 box 프롬프트로 직접 넘겼는데 production이
+         박스 중심점(point)만 넘기는 방식으로 회귀해 마스크가 부정확·과대해졌다.
+         add_box(session, box) 계약을 더블로 흉내 내, app이 자동 재매칭 통과 샷에서
+         중심점 변환(_box_center) 대신 detect best box를 add_box로 전달하는지
+         add_box_call_count 스파이로 단언한다. box 경로는 box 영역 사각형을
+         그대로 마스크로 반환해 결정적(centroid·bbox 예측 가능)이다.
 """
 from __future__ import annotations
 
@@ -318,6 +326,10 @@ class _FakeSession:
     def __init__(self, frames: list[np.ndarray]) -> None:
         self.frames = frames
         self.click_point: tuple[int, int] | None = None
+        # box 프롬프트 경로 — add_box로 등록된 (x1, y1, x2, y2). 미등록 시 None.
+        # WHY: box 경로(box 프롬프트)와 point 경로(click)를 propagate에서 구분해
+        #      box가 있으면 box 영역 사각형을, 없으면 클릭점 중심 사각형을 반환한다.
+        self.box: tuple[float, float, float, float] | None = None
 
 
 class FakeVideoBackend:
@@ -336,10 +348,13 @@ class FakeVideoBackend:
     스파이 카운터:
         init_call_count     — init_session 호출 횟수
         add_click_call_count — add_click 호출 횟수
+        add_box_call_count   — add_box 호출 횟수 (box 프롬프트 경로)
         propagate_call_count — propagate 호출 횟수
         WHY: track 1회 후 compute_boxes를 여러 번 호출해도
              propagate_call_count == 1 임을 단언해 재추적 없음을 강제한다.
              이미지 모드 segment_call_count 가드의 비디오판.
+             add_box_call_count: app이 자동 재매칭 통과 샷에서 중심점 변환 대신
+             detect best box를 add_box로 넘기는지 단언하는 box 프롬프트 가드.
     """
 
     device: str = "cpu"
@@ -359,6 +374,7 @@ class FakeVideoBackend:
         # 스파이 카운터 — 초기값 0, 각 메서드 호출마다 +1
         self.init_call_count: int = 0
         self.add_click_call_count: int = 0
+        self.add_box_call_count: int = 0
         self.propagate_call_count: int = 0
 
     def init_session(self, frames: list[np.ndarray]) -> _FakeSession:
@@ -382,26 +398,45 @@ class FakeVideoBackend:
         self.add_click_call_count += 1
         session.click_point = point
 
+    def add_box(
+        self,
+        session: _FakeSession,
+        box: tuple[float, float, float, float],
+    ) -> None:
+        """첫 프레임에 전경 box 프롬프트(x1, y1, x2, y2)를 등록한다.
+
+        Given: _FakeSession 인스턴스, (x1, y1, x2, y2) box 좌표
+        When:  add_box 호출
+        Then:  session.box에 저장, add_box_call_count +1
+
+        WHY: PoC가 쓰던 box 프롬프트(detect 전신 bbox→SAM2)를 더블로 흉내 낸다.
+             propagate에서 box가 등록돼 있으면 box 영역 사각형을 마스크로 반환해
+             '중심점 1개(point)'보다 정확한 전신 마스크를 결정적으로 모사한다.
+        """
+        self.add_box_call_count += 1
+        session.box = box
+
     def propagate(self, session: _FakeSession) -> list[np.ndarray]:
         """세션을 끝까지 전파해 프레임별 bool HxW 마스크 리스트를 반환한다.
 
-        Given: add_click으로 포인트가 등록된 _FakeSession
+        Given: add_click(point) 또는 add_box(box)로 프롬프트가 등록된 _FakeSession
         When:  propagate 호출
         Then:  프레임 수만큼의 bool HxW 마스크 리스트 반환, propagate_call_count +1.
-               drift 적용: 프레임 i마다 클릭점 중심이 i*dx, i*dy 이동.
+               box 등록 시: box 영역 사각형 마스크(중심에 drift 적용).
+               box 미등록 시: 클릭점 중심 사각형(drift 적용).
                empty_after 적용: 해당 인덱스 이후 빈 마스크(occlusion 경로).
 
         WHY: 결정적 마스크로 centroid 시퀀스가 예측 가능해
              smooth_centroids 적용 결과를 수동 계산과 비교할 수 있다.
+             box 경로는 box 영역 자체를 마스크로 반환해 point 경로(중심점 1개
+             주변 고정 반경 사각형)와 결과 bbox가 구분되도록 한다.
         """
         self.propagate_call_count += 1
         if not session.frames:
             return []
 
         h, w = session.frames[0].shape[:2]
-        # 클릭 포인트 미등록 시 프레임 중앙을 기본값으로 사용
-        base_x = session.click_point[0] if session.click_point else w // 2
-        base_y = session.click_point[1] if session.click_point else h // 2
+        base_x, base_y, half_or_box = self._resolve_prompt(session, w, h)
 
         dx, dy = self._drift
         masks: list[np.ndarray] = []
@@ -415,8 +450,55 @@ class FakeVideoBackend:
             else:
                 cx = int(base_x + i * dx)
                 cy = int(base_y + i * dy)
-                masks.append(_make_rect_mask(h, w, cx, cy, _VIDEO_MASK_HALF_SIZE))
+                masks.append(self._build_mask(h, w, cx, cy, half_or_box))
         return masks
+
+    @staticmethod
+    def _resolve_prompt(
+        session: _FakeSession,
+        w: int,
+        h: int,
+    ) -> tuple[int, int, tuple[int, int] | int]:
+        """등록된 프롬프트(box 우선, 없으면 click)에서 중심·반경 정보를 도출한다.
+
+        Returns:
+            (base_x, base_y, half_or_box) —
+            box 경로면 half_or_box=(half_w, half_h)(box 절반 크기),
+            point 경로면 half_or_box=_VIDEO_MASK_HALF_SIZE(고정 반경 정수).
+
+        WHY: propagate를 20줄 이내로 유지하면서 box/point 경로의 중심·크기를
+             한 곳에서 결정해 _build_mask가 분기 없이 사각형을 그리게 한다.
+        """
+        if session.box is not None:
+            x1, y1, x2, y2 = session.box
+            base_x = int((x1 + x2) / 2)
+            base_y = int((y1 + y2) / 2)
+            half_w = max(1, int((x2 - x1) / 2))
+            half_h = max(1, int((y2 - y1) / 2))
+            return base_x, base_y, (half_w, half_h)
+        base_x = session.click_point[0] if session.click_point else w // 2
+        base_y = session.click_point[1] if session.click_point else h // 2
+        return base_x, base_y, _VIDEO_MASK_HALF_SIZE
+
+    @staticmethod
+    def _build_mask(
+        h: int,
+        w: int,
+        cx: int,
+        cy: int,
+        half_or_box: tuple[int, int] | int,
+    ) -> np.ndarray:
+        """중심·반경 정보로 사각형 bool 마스크를 만든다(box/point 공통)."""
+        if isinstance(half_or_box, tuple):
+            half_w, half_h = half_or_box
+            mask = np.zeros((h, w), dtype=bool)
+            y1 = max(0, cy - half_h)
+            y2 = min(h, cy + half_h)
+            x1 = max(0, cx - half_w)
+            x2 = min(w, cx + half_w)
+            mask[y1:y2, x1:x2] = True
+            return mask
+        return _make_rect_mask(h, w, cx, cy, half_or_box)
 
 
 # ---------------------------------------------------------------------------

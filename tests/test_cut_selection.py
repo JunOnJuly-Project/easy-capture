@@ -67,6 +67,23 @@ N_SHOTS_3 = 3
 SHOT_OUT_OF_RANGE = 3
 SHOT_NEGATIVE = -1
 
+# box 프롬프트 좌표 (x1, y1, x2, y2) — detect 전신 bbox를 흉내 낸 합성 박스.
+# WHY: box 프롬프트(detect bbox→SAM2) 도입으로 CutSelection이 point 외에
+#      선택 대상의 전신 bbox(box)를 함께 보관해야 한다(Story D).
+BOX_A = (100.0, 50.0, 200.0, 300.0)
+BOX_B = (300.0, 80.0, 380.0, 320.0)
+
+# CutSelection.box 필드 존재 여부 판별 — 미구현 시 box 테스트만 skip(무회귀 격리).
+# WHY: box 필드는 신규(하위호환 default None)다. dataclasses.fields로 존재를
+#      판별해, 필드 추가 전에는 box 테스트만 skip 처리되고 기존 테스트는 통과한다.
+_HAS_BOX_FIELD = False
+if _HAS_CUT_SELECTION:
+    from dataclasses import fields as _dc_fields
+
+    _HAS_BOX_FIELD = any(f.name == "box" for f in _dc_fields(CutSelection))
+
+_MSG_NO_BOX_FIELD = "CutSelection.box 필드 미구현 — box 프롬프트 RED 예상"
+
 # 순수성 가드 — import 금지 모듈 목록(core 경계 불변식)
 _FORBIDDEN_MODULES = ("torch", "transformers", "PySide6", "av", "scenedetect")
 
@@ -187,6 +204,95 @@ class TestCutSelectionDataclass:
         b = CutSelection(shot_index=SHOT_1, point=POINT_A)
 
         assert a != b
+
+
+# ---------------------------------------------------------------------------
+# CutSelection.box — box 프롬프트 필드 (Story D, 하위호환 default None)
+# ---------------------------------------------------------------------------
+class TestCutSelectionBoxField:
+    """CutSelection.box: 선택 대상 전신 bbox를 보관하는 신규 필드(하위호환).
+
+    배경:
+      box 프롬프트(detect bbox→SAM2) 도입으로 자동 재매칭/사용자 선택 시
+      중심점(point) 대신 전신 bbox를 SAM2 box 프롬프트로 넘겨야 마스크가
+      정확해진다(과대·옆사람 팔 포함 회귀 해결). CutSelection이 그 box를
+      함께 보관할 수 있도록 box 필드를 추가하되, 기존 (shot_index, point)
+      생성 코드는 절대 깨지면 안 되므로 default None으로 하위호환을 보장한다.
+    """
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_BOX_FIELD, reason=_MSG_NO_BOX_FIELD)
+    def test_box를_생략하면_기본값이_None이다(self):
+        """Given: shot_index·point만 지정(box 생략)
+        When:  CutSelection 생성
+        Then:  .box == None
+
+        WHY: box 필드는 하위호환을 위해 default None이어야 한다. 기존
+             CutSelection(shot_index, point) 호출이 box 추가로 깨지면 안 된다.
+        """
+        selection = CutSelection(shot_index=SHOT_0, point=POINT_A)
+
+        assert selection.box is None
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_BOX_FIELD, reason=_MSG_NO_BOX_FIELD)
+    def test_box를_지정하면_그대로_보관한다(self):
+        """Given: shot_index·point·box를 지정
+        When:  CutSelection 생성
+        Then:  .box == BOX_A (지정한 전신 bbox 그대로 보관)
+
+        WHY: box 프롬프트 경로가 사용자 선택 대상의 전신 bbox를 SAM2에
+             그대로 전달할 수 있도록 (x1, y1, x2, y2)를 보관해야 한다.
+        """
+        selection = CutSelection(shot_index=SHOT_0, point=POINT_A, box=BOX_A)
+
+        assert selection.box == BOX_A
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_BOX_FIELD, reason=_MSG_NO_BOX_FIELD)
+    def test_box_지정_시에도_frozen이라_수정하면_예외가_발생한다(self):
+        """Given: box를 지정한 CutSelection 인스턴스
+        When:  box 필드 수정 시도
+        Then:  FrozenInstanceError(또는 AttributeError) 발생
+
+        WHY: box도 frozen 불변식에 포함돼 사용자 선택이 실수로 덮어씌워지는
+             버그를 차단한다(shot_index·point 패턴 계승).
+        """
+        from dataclasses import FrozenInstanceError
+
+        selection = CutSelection(shot_index=SHOT_0, point=POINT_A, box=BOX_A)
+
+        with pytest.raises((FrozenInstanceError, AttributeError)):
+            selection.box = BOX_B  # type: ignore[misc]
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_BOX_FIELD, reason=_MSG_NO_BOX_FIELD)
+    def test_box가_다르면_CutSelection은_동등하지_않다(self):
+        """Given: shot_index·point는 같고 box만 다른 두 인스턴스
+        When:  == 비교
+        Then:  비동등(False)
+
+        WHY: box도 값 동등성(eq)에 포함돼야 box가 바뀐 선택을 별개로 취급한다.
+        """
+        a = CutSelection(shot_index=SHOT_0, point=POINT_A, box=BOX_A)
+        b = CutSelection(shot_index=SHOT_0, point=POINT_A, box=BOX_B)
+
+        assert a != b
+
+    @pytest.mark.skipif(not _HAS_CUT_SELECTION, reason=_MSG_NO_CUT_SELECTION)
+    @pytest.mark.skipif(not _HAS_BOX_FIELD, reason=_MSG_NO_BOX_FIELD)
+    def test_box_생략_생성과_box_None_명시_생성은_동등하다(self):
+        """Given: box 생략 인스턴스와 box=None 명시 인스턴스
+        When:  == 비교
+        Then:  동등(True)
+
+        WHY: 하위호환 default None이 명시 None과 동일하게 취급돼야
+             기존 코드가 만든 인스턴스와 신규 코드가 만든 인스턴스가 일치한다.
+        """
+        omitted = CutSelection(shot_index=SHOT_1, point=POINT_B)
+        explicit_none = CutSelection(shot_index=SHOT_1, point=POINT_B, box=None)
+
+        assert omitted == explicit_none
 
 
 # ---------------------------------------------------------------------------
