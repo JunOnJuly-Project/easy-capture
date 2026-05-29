@@ -463,3 +463,50 @@ class TestRegression:
         x, y = received[0]
         assert isinstance(x, int)
         assert isinstance(y, int)
+
+
+# ---------------------------------------------------------------------------
+# 박스 렌더링 — _render/_draw_boxes가 실제로 테두리를 그리는지 픽셀 검증
+# ---------------------------------------------------------------------------
+
+class TestBoxRendering:
+    """set_boxes 후 _draw_boxes가 색상별 박스 테두리를 실제로 그리는지 검증한다.
+
+    WHY: set_boxes가 상태만 저장하고 _render에 박스 단계가 없으면 박스가
+         화면에 보이지 않는다(사일런트 누락). 픽셀로 렌더 결과를 직접 단언한다.
+    """
+
+    def test_draw_boxes가_대상_박스를_초록_테두리로_그린다(self, app):
+        canvas = _make_canvas(app)
+        frame = _make_frame()
+        canvas.set_frame(frame)
+        canvas.set_boxes([_BOX_A], target_idx=0)
+
+        result = canvas._draw_boxes(canvas._frame_to_pixmap(frame))
+        color = result.toImage().pixelColor(30, 10)  # _BOX_A 상단 경계
+
+        assert color.green() > color.red()
+        assert color.green() > color.blue()
+
+    def test_draw_boxes가_배제_박스를_빨강_테두리로_그린다(self, app):
+        canvas = _make_canvas(app)
+        frame = _make_frame()
+        canvas.set_frame(frame)
+        canvas.set_boxes([_BOX_A], target_idx=None, negative_idxs=(0,))
+
+        result = canvas._draw_boxes(canvas._frame_to_pixmap(frame))
+        color = result.toImage().pixelColor(30, 10)
+
+        assert color.red() > color.green()
+        assert color.red() > color.blue()
+
+    def test_박스_사이_빈_영역은_원본_검정을_유지한다(self, app):
+        canvas = _make_canvas(app)
+        frame = _make_frame()
+        canvas.set_frame(frame)
+        canvas.set_boxes(_SAMPLE_BOXES, target_idx=0)
+
+        result = canvas._draw_boxes(canvas._frame_to_pixmap(frame))
+        color = result.toImage().pixelColor(55, 50)  # _BOX_A·_BOX_B 사이
+
+        assert color.red() < 50 and color.green() < 50 and color.blue() < 50

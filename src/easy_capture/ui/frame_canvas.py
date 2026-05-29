@@ -203,6 +203,8 @@ class FrameCanvas(QWidget):
         pixmap = self._frame_to_pixmap(self._frame)
         if self._overlay is not None:
             pixmap = self._draw_overlay(pixmap, self._overlay)
+        if self._boxes:
+            pixmap = self._draw_boxes(pixmap)
         self._label.setPixmap(
             pixmap.scaled(
                 self._label.size(),
@@ -239,3 +241,25 @@ class FrameCanvas(QWidget):
         painter.drawImage(0, 0, overlay_img)
         painter.end()
         return result
+
+    def _draw_boxes(self, base: QPixmap) -> QPixmap:
+        """후보 박스들을 인덱스별 색으로 base(이미지 좌표계) 위에 그린다.
+
+        box_color_for로 색을 정하고 _draw_one_box로 테두리를 그린다.
+        마스크 오버레이와 동일하게 원본 해상도에 그린 뒤 함께 scaled 된다
+        (박스-마스크-클릭 좌표 자동 정합, 레터박스 오프셋 회피).
+        """
+        result = base.copy()
+        painter = QPainter(result)
+        for index, box in enumerate(self._boxes):
+            color = box_color_for(index, self._target_idx, self._negative_idxs)
+            self._draw_one_box(painter, box, color)
+        painter.end()
+        return result
+
+    def _draw_one_box(self, painter, box, color: tuple[int, int, int]) -> None:
+        """박스 (x1, y1, x2, y2)를 주어진 색의 테두리(채움 없음)로 그린다."""
+        x1, y1, x2, y2 = box
+        painter.setPen(QPen(QColor(*color), _BOX_LINE_WIDTH))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
