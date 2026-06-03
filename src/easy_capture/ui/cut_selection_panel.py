@@ -180,7 +180,7 @@ class CutSelectionPanel(QWidget):
         self._sync_widgets()
         self.selection_changed.emit()
 
-    def _set_choice(self, target_idx: int | None, negatives) -> None:
+    def _set_choice(self, target_idx: int | None, negatives: set[int]) -> None:
         """현재 샷의 ShotChoice를 갱신한다(negative는 결정적 정렬 튜플)."""
         self._choices[self._current] = ShotChoice(
             target_idx=target_idx,
@@ -251,7 +251,7 @@ class CutSelectionPanel(QWidget):
         radio = QRadioButton(_TARGET_BUTTON_TEXT)
         self._radio_group.addButton(radio, index)
         radio.toggled.connect(
-            lambda checked, i=index: checked and self.set_target(i)
+            lambda checked, i=index: self.set_target(i) if checked else None
         )
         check = QCheckBox(_NEGATIVE_BUTTON_TEXT)
         check.toggled.connect(
@@ -296,7 +296,7 @@ class CutSelectionPanel(QWidget):
             radio.blockSignals(False)
         self._radio_group.setExclusive(True)
 
-    def _sync_checks(self, negative_idxs) -> None:
+    def _sync_checks(self, negative_idxs: tuple[int, ...]) -> None:
         """negative 체크 상태를 동기화한다(blockSignals로 toggled 재진입 차단)."""
         for index, check in enumerate(self._checks):
             check.blockSignals(True)

@@ -124,7 +124,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 2. ✅ **데스크톱 컷별 선택 UI**(Story 4 Task 4-2~4-6 완료 + 리뷰 후속 → **main 머지 완료**): 캔버스 박스 클릭 hit-test+패널 선택+워커 2분할+모드 자동전환+`detect_cuts` 이중 실행 해소. 헤드리스 678 테스트. **남은 것**: 실 GPU GUI 재현(Colab — `docs/plans/cut-selection-ui-gpu-gate.md` 체크리스트로 AC-01 100% 재현 확인).
 3. ✅ **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경 완료. Colab `app_verify`(셀 6) tiny→small, OOM 폴백 안내 정합화. Kaggle은 이미 small이라 OOM 안내만 정합. PoC 노트북(`gpu_poc`)은 historical이라 유지.
 4. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
-5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(_DetectWorker except 범위 좁히기·타입힌트·상수명 분리)
+5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(일부 해소 — 아래 리뷰 제안 백로그 참조)
 
 ### 백로그
 - **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): 경량 백엔드(EdgeTAM 등) v1.1 / fp16·half / 프레임 서브샘플
@@ -165,6 +165,12 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 - [ ] (비디오) `app/video_capture._fallback_center` 첫 프레임 None 케이스 단위 테스트 추가
 - [ ] (재추적) `core/tracking.select_best_match` prev_feat 항상 None(위치 기반만) — cls_sim 확장점 docstring 명시
 - [ ] (재추적) `app/video_capture` prev_box None인데 detect 호출 후 폐기 — WHY 주석(카운터 일관성)
+- [해소] (컷선택 UI) `core/tracking/cut_selection` 좌표 하한 상수 의미 충돌 → `_COORD_MIN` 분리 완료
+- [해소] (컷선택 UI) `ui/cut_selection_panel` `_set_choice`/`_sync_checks` 타입힌트 추가 완료
+- [해소] (컷선택 UI) `ui/cut_selection_panel` 라디오 람다 `checked and ...` → `... if checked else None` 가독성 개선 완료
+- [유지] (컷선택 UI) `ui/video_window._DetectWorker` 광범위 `except` — 좁히기 보류(검출 단계 예외 다양·미처리 시 워커 사일런트 사망). WHY 주석으로 의도 명시 완료
+- [ ] (컷선택 UI) `ui/video_window` 워커 시그널 `deleteLater()`/`finished` 명시 정리(현재 isRunning 가드로 정상, _ExportWorker 패턴 통일 검토)
+- [ ] (컷선택 UI) `ui/frame_canvas` 빈 박스 모드 클릭 시 항상 hit=None 안내 — 의도 확인(현 동작 정상)
 
 ---
 

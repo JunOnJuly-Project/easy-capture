@@ -18,6 +18,10 @@ from dataclasses import dataclass
 # 샷 인덱스 하한 — 0-기반(음수 인덱스 차단용 상수)
 _SHOT_INDEX_MIN = 0
 
+# 픽셀 좌표 하한 — 0-기반(프레임 밖 음수 좌표 차단용). 값은 _SHOT_INDEX_MIN과
+# 같지만 의미가 다르므로(샷 순번 vs 픽셀 좌표) 별도 상수로 분리한다(리뷰 [제안]).
+_COORD_MIN = 0
+
 
 @dataclass(frozen=True)
 class CutSelection:
@@ -141,7 +145,7 @@ def _raise_if_negative_out_of_bounds(
 ) -> None:
     """negative 좌표가 [0, W)×[0, H) 범위를 벗어나면 한국어 ValueError 발생."""
     x, y = negative
-    if not (_SHOT_INDEX_MIN <= x < width and _SHOT_INDEX_MIN <= y < height):
+    if not (_COORD_MIN <= x < width and _COORD_MIN <= y < height):
         raise ValueError(
             f"negative 좌표 {negative}가 프레임(0 이상 {width}×{height} 미만)을 "
             "벗어났습니다."

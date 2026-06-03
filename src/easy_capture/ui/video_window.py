@@ -206,6 +206,9 @@ class _DetectWorker(QThread):
             shots = usecase.detect_cut_candidates(frames, cut_frames)
             self.candidates_ready.emit((cut_frames, shots))
         except Exception as exc:  # noqa: BLE001
+            # WHY 광범위 catch: 검출 단계 오류 종류가 다양하다(파일 IO·scenedetect·
+            #   Grounding DINO 추론·모델 로드). 좁히면 미처리 예외가 워커 스레드를
+            #   조용히 죽여 UI가 멈춘다 — 모든 오류를 한국어로 UI에 전달한다.
             self.error.emit(f"컷 감지 오류: {exc}")
 
 
