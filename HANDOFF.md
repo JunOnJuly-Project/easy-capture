@@ -127,7 +127,8 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(일부 해소 — 아래 리뷰 제안 백로그 참조)
 
 ### 백로그
-- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): 경량 백엔드(EdgeTAM 등) v1.1 / fp16·half / 프레임 서브샘플
+- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): ✅ **타당성 조사 완료** → [`docs/plans/ac06-fps-improvement.md`](docs/plans/ac06-fps-improvement.md). 결론: **1순위 fp16/bf16**(현재 `sam2_video_backend.py:74` fp32 고정 — 공짜에 가까운 이득, T4=fp16/최신=bf16, AC-01 재게이트 필수), **차순위 EdgeTAM**(transformers 5.10+ `EdgeTamVideoModel`·Apache 2.0·SAM2 video 동일 API — memory attention 병목 직격이나 T4 fps·box/negative·군무 정확도 미검증 → 노트북 측정 선결). 프레임 서브샘플은 정확도 리스크로 보류. **다음**: app_verify 노트북에 로드/전파 분리 측정 셀 추가 → A(fp16) 측정.
+- **device.py 모델 카탈로그 정합화 검토**: `infra/device.py:12` cuda 기본이 `hiera-base-plus`인데 GPU 게이트는 `hiera-small`로 통과(base-plus가 더 무거움) → 데스크톱 기본을 small로 맞출지 결정 필요(fps 작업과 연계).
 
 ### 백로그(리뷰 [제안])
 - 미리보기 스크럽(prev/next), 클램프 경고 확인 다이얼로그, segment_logic 물리 분리, GIF fallback `1000/12.0`→상수화.
