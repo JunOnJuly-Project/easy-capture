@@ -122,7 +122,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 ### 미완료 (다음 작업 순서) ⏳
 1. ✅ **Colab 게이트 통과 완료**(2026-05-29): hiera-small + 컷별 선택(box+negative) + 올바른 shot_index 키 → 멀티샷 군무 **AC-01 100%(300/300)·needs_correction 0·2.0fps**. tiny는 재합침으로 미달 → small 필요(ADR 0015 R1 해소), largest_component 철회로 0.7→2.0fps 복구.
 2. ✅ **데스크톱 컷별 선택 UI**(Story 4 Task 4-2~4-6 완료 + 리뷰 후속 → **main 머지 완료**): 캔버스 박스 클릭 hit-test+패널 선택+워커 2분할+모드 자동전환+`detect_cuts` 이중 실행 해소. 헤드리스 678 테스트. **남은 것**: 실 GPU GUI 재현(Colab — `docs/plans/cut-selection-ui-gpu-gate.md` 체크리스트로 AC-01 100% 재현 확인).
-3. **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경
+3. ✅ **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경 완료. Colab `app_verify`(셀 6) tiny→small, OOM 폴백 안내 정합화. Kaggle은 이미 small이라 OOM 안내만 정합. PoC 노트북(`gpu_poc`)은 historical이라 유지.
 4. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
 5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(_DetectWorker except 범위 좁히기·타입힌트·상수명 분리)
 
