@@ -97,8 +97,10 @@ class _FakeUseCase:
         self._cut_frames = cut_frames if cut_frames is not None else [_CUT_FRAME]
         self._shots = shots if shots is not None else _make_two_shots()
         self.track_calls: list = []
+        self.detect_cuts_calls: list = []
 
     def detect_cuts(self, video_path, span):
+        self.detect_cuts_calls.append((video_path, span))
         return self._cut_frames
 
     def detect_cut_candidates(self, frames, cut_frames):
@@ -216,6 +218,73 @@ class TestSelectionsWiring:
 
         # track 호출의 selections 인자가 그대로 전달됐는지
         assert usecase.track_calls[0][2] is sentinel
+
+
+# ===========================================================================
+# 2b. cut_frames 재사용 (detect_cuts 이중 실행 방지, reviewer [중요])
+# ===========================================================================
+
+class TestCutFramesReuse:
+    """컷 모드 추적이 _DetectWorker의 cut_frames를 재사용해 재감지를 생략한다."""
+
+    def test_컷_감지_결과가_추적_워커에_주입된다(self, monkeypatch):
+        monkeypatch.setattr(vw._TrackWorker, "start", lambda self: None)
+        usecase = _FakeUseCase()
+        win = _make_window(usecase)
+        win._on_candidates_ready(([_CUT_FRAME], _make_two_shots()))
+        win._cut_panel.set_target(0)
+
+        win._on_track()
+
+        assert win._track_worker._cut_frames == [_CUT_FRAME]
+
+    def test_단일_모드_추적은_cut_frames가_None이다(self, monkeypatch):
+        monkeypatch.setattr(vw._TrackWorker, "start", lambda self: None)
+        usecase = _FakeUseCase()
+        win = _make_window(usecase)
+        win._cut_mode = False
+        win._pending_point = _CLICK_IN_A
+
+        win._on_track()
+
+        assert win._track_worker._cut_frames is None
+
+    def test_단일_모드_복귀_시_cut_frames가_초기화된다(self):
+        usecase = _FakeUseCase()
+        win = _make_window(usecase)
+        win._on_candidates_ready(([_CUT_FRAME], _make_two_shots()))
+        assert win._cut_frames == [_CUT_FRAME]
+
+        win._enter_single_mode()
+
+        assert win._cut_frames is None
+
+    def test_주입된_cut_frames면_워커가_detect_cuts를_재호출하지_않는다(self):
+        _get_app()
+        usecase = _FakeUseCase()
+        worker = vw._TrackWorker(
+            usecase, _make_frames(), _CLICK_IN_A,
+            video_path="f.mp4", span=FrameSpan(0, _N_FRAMES),
+            selections=[], cut_frames=[_CUT_FRAME],
+        )
+
+        worker.run()
+
+        assert usecase.detect_cuts_calls == []  # 재감지 생략
+        assert usecase.track_calls[0][1] == [_CUT_FRAME]  # 주입값 그대로 전달
+
+    def test_cut_frames_미주입이면_워커가_detect_cuts로_자동_감지한다(self):
+        _get_app()
+        usecase = _FakeUseCase()
+        worker = vw._TrackWorker(
+            usecase, _make_frames(), _CLICK_IN_A,
+            video_path="f.mp4", span=FrameSpan(0, _N_FRAMES),
+            selections=None, cut_frames=None,
+        )
+
+        worker.run()
+
+        assert len(usecase.detect_cuts_calls) == 1  # 단일 모드 자동 감지 경로 유지
 
 
 # ===========================================================================

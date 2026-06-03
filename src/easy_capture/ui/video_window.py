@@ -106,7 +106,8 @@ class _TrackWorker(QThread):
          _SegWorker(이미지 모드) 패턴을 그대로 계승: Signal·run·예외 처리 동형.
 
     배선 흐름:
-      1. usecase.detect_cuts(video_path, span)으로 컷 프레임 인덱스를 구한다.
+      1. cut_frames가 주입되면(컷 모드) 그대로 쓰고, 없으면(단일 모드)
+         usecase.detect_cuts(video_path, span)으로 컷 프레임 인덱스를 구한다.
          detector 없으면 None 반환 — usecase가 infra 위임 책임을 가진다.
       2. track(frames, point, cut_frames=...)으로 샷 경계 재추적을 실행한다.
     """
@@ -115,7 +116,8 @@ class _TrackWorker(QThread):
     error = Signal(str)           # 한국어 오류 메시지
 
     def __init__(
-        self, usecase, frames, point, video_path=None, span=None, selections=None
+        self, usecase, frames, point,
+        video_path=None, span=None, selections=None, cut_frames=None,
     ) -> None:
         """워커 초기화.
 
@@ -126,10 +128,12 @@ class _TrackWorker(QThread):
             video_path: 비디오 파일 경로(detect_cuts 입력용, None이면 컷 감지 생략).
             span:       FrameSpan(start, end) 구간(detect_cuts 입력용).
             selections: 샷별 사용자 명시 선택 리스트(없으면 자동 경로, 무회귀).
+            cut_frames: 컷 모드에서 _DetectWorker가 이미 감지한 컷 프레임. 주입되면
+                        detect_cuts 재호출을 생략한다(이중 감지·shot_index 정합성 방지).
 
-        WHY: 매개변수 6개 — VideoCaptureUseCase 생성자 결정(조립 의존성은 명시
-             주입이 가독성 우위)을 워커에도 계승한다. selections는 기본 None으로
-             기존 단일 추적 호출을 깨지 않는다.
+        WHY: 매개변수 7개 — VideoCaptureUseCase 생성자 결정(조립 의존성은 명시
+             주입이 가독성 우위)을 워커에도 계승한다. selections·cut_frames는 기본
+             None으로 기존 단일 추적 호출을 깨지 않는다.
         """
         super().__init__()
         self._usecase = usecase
@@ -138,6 +142,7 @@ class _TrackWorker(QThread):
         self._video_path = video_path
         self._span = span
         self._selections = selections
+        self._cut_frames = cut_frames
 
     def run(self) -> None:
         """usecase.detect_cuts → usecase.track을 워커 스레드에서 실행한다."""
@@ -158,11 +163,18 @@ class _TrackWorker(QThread):
             self.error.emit(f"추적 오류: {exc}")
 
     def _resolve_cut_frames(self) -> list[int] | None:
-        """video_path·span이 있으면 usecase.detect_cuts에 위임한다.
+        """주입된 cut_frames를 우선 쓰고, 없으면 usecase.detect_cuts에 위임한다.
 
-        WHY: infra.shot_detect 직접 호출(ui→infra 위반)을 제거하고
+        WHY 재사용: 컷 모드에서는 _DetectWorker가 이미 detect_cuts를 수행했다.
+             그 결과를 주입받아 재호출을 생략한다 — 동일 구간 이중 감지(성능)와,
+             재감지 결과가 달라져 selections의 shot_index 범위가 어긋나는 정합성
+             위험을 함께 막는다(단일 진실 소스). 단일 모드는 cut_frames=None이므로
+             기존 자동 감지 경로(video_path·span)를 그대로 탄다.
+        WHY 경계: infra.shot_detect 직접 호출(ui→infra 위반)을 제거하고
              usecase 공개 API만 사용한다. video_path 없으면 단일 샷 폴백.
         """
+        if self._cut_frames is not None:
+            return self._cut_frames
         if self._video_path is None or self._span is None:
             return None
         return self._usecase.detect_cuts(self._video_path, self._span)
@@ -260,6 +272,8 @@ class VideoMainWindow(QMainWindow):
         # 컷 선택 모드 상태 — detect_cut_candidates 결과 보관
         self._shot_candidates: list | None = None
         self._cut_mode: bool = False
+        # _DetectWorker가 감지한 컷 프레임 — 추적 시 _TrackWorker에 주입해 재감지 생략
+        self._cut_frames: list[int] | None = None
 
         # 트림 활성 여부 — export 시 TrimRange 생성 여부를 결정
         self._trim_enabled: bool = False
@@ -587,14 +601,19 @@ class VideoMainWindow(QMainWindow):
             if inputs is None:
                 return  # 선택 빌드 오류 — QMessageBox 이미 표시됨
             point, selections = inputs
+            cut_frames = self._cut_frames  # _DetectWorker 결과 재사용(재감지 생략)
         else:
             if self._pending_point is None:
                 return
-            point, selections = self._pending_point, None
-        self._start_track_worker(point, selections)
+            point, selections, cut_frames = self._pending_point, None, None
+        self._start_track_worker(point, selections, cut_frames)
 
-    def _start_track_worker(self, point, selections) -> None:
-        """추적 워커를 생성·시작한다(단일/컷 공통 경로)."""
+    def _start_track_worker(self, point, selections, cut_frames) -> None:
+        """추적 워커를 생성·시작한다(단일/컷 공통 경로).
+
+        cut_frames가 None이면(단일 모드) 워커가 video_path·span으로 자동 감지하고,
+        주입되면(컷 모드) 재감지 없이 그대로 쓴다.
+        """
         self._set_status(
             "추적 중… (처음 실행 시 모델 로드로 시간이 걸릴 수 있습니다)"
         )
@@ -606,6 +625,7 @@ class VideoMainWindow(QMainWindow):
             video_path=self._video_path,
             span=self._pending_span,
             selections=selections,
+            cut_frames=cut_frames,
         )
         self._track_worker.track_ready.connect(self._on_track_ready)
         self._track_worker.error.connect(self._on_track_error)
@@ -703,6 +723,8 @@ class VideoMainWindow(QMainWindow):
                 "컷이 감지되지 않았습니다. 피사체를 클릭해 단일 추적하세요."
             )
             return
+        # 추적 시 _TrackWorker에 주입해 detect_cuts 재호출을 생략한다(단일 진실 소스).
+        self._cut_frames = cut_frames
         self._enter_cut_mode(shots)
 
     def _on_detect_error(self, message: str) -> None:
@@ -732,6 +754,7 @@ class VideoMainWindow(QMainWindow):
         """
         self._cut_mode = False
         self._shot_candidates = None
+        self._cut_frames = None
         self._pending_point = None
         self._cut_panel.setVisible(False)
         self._canvas.clear_boxes()
