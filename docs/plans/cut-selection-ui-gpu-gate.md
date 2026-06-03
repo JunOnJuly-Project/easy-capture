@@ -139,12 +139,13 @@ track_result = usecase.track(
 
 **GUI 경로**: `_TrackWorker.run()` → `usecase.track(frames, point, cut_frames=..., selections=self._selections)`
 
-`cut_frames`는 `_TrackWorker._resolve_cut_frames()`가 `usecase.detect_cuts(video_path, span)`을 재호출해 확보한다. 이 재호출은 결정적이며(같은 영상·구간) `selections`의 `shot_index`와 정합된다(ADR 0016 §2).
+`cut_frames`는 컷 모드에서 `_DetectWorker`가 감지한 값을 `VideoMainWindow._cut_frames`에 보관했다가 `_TrackWorker`에 **주입**한다(`_resolve_cut_frames()`가 주입값을 우선 반환 → `detect_cuts` 재호출 없음). 단일 진실 소스이므로 `selections`의 `shot_index`와 항상 정합된다(ADR 0016 §2, 2026-06-04 개정). 단일 모드에서만 `video_path·span`으로 자동 감지하는 폴백 경로를 탄다.
 
 | 항목 | 확인 조건 | 상태 |
 |---|---|---|
 | `track` 인자 일치 | `(frames, point, cut_frames=..., selections=...)` — 노트북 셀 8과 동일 | ✅ 코드 확인 |
-| `cut_frames` 정합 | `_resolve_cut_frames()`가 동일 `video_path·span`으로 재실행 → `shot_index` 범위 보장 | ✅ 코드 확인 |
+| `cut_frames` 정합 | `_DetectWorker` 감지값을 `_TrackWorker`에 주입 → 동일 컷 경계로 `shot_index` 범위 보장 | ✅ 코드 확인 |
+| 재감지 생략 | `TestCutFramesReuse.test_주입된_cut_frames면_워커가_detect_cuts를_재호출하지_않는다` | ✅ 통과 |
 
 ### 2-6. 박스 클릭 hit-test
 

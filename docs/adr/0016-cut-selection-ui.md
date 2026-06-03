@@ -2,6 +2,7 @@
 
 - 상태: 채택 (Story 4 Task 4-1 구현 확정)
 - 날짜: 2026-05-29
+- 개정: 2026-06-04 — 결정 2 변경(`_TrackWorker`가 `detect_cuts`를 재호출하지 않고 `_DetectWorker` 결과를 주입받음. 머지 전 리뷰 [중요] 반영)
 
 ## 맥락
 
@@ -32,7 +33,9 @@
 백그라운드 워커를 두 개로 분리한다.
 
 - **`_DetectWorker`**: `detect_cuts` + `detect_cut_candidates`(Grounding DINO 후보 열거)를 수행한다. SAM2 propagate를 포함하지 않으므로 빠르게 완료되며, 완료 시 컷별 선택 UI(후보 박스 오버레이 + 선택 패널)를 즉시 표시한다.
-- **`_TrackWorker`**: 사용자가 컷별 선택을 확정한 뒤 호출하며 SAM2 propagate(무거운 연산)를 수행한다. `video_path`·`span`으로 `detect_cuts`를 재호출해 컷 정보를 확보한다(중복이나 결정적이므로 `selections`의 `shot_index`와 항상 정합).
+- **`_TrackWorker`**: 사용자가 컷별 선택을 확정한 뒤 호출하며 SAM2 propagate(무거운 연산)를 수행한다. 컷 정보는 `_DetectWorker`가 이미 감지한 `cut_frames`를 **주입받아 재사용**한다(`detect_cuts` 재호출 없음). 단일 모드(컷 미감지)에서만 `video_path`·`span`으로 자동 감지하는 폴백 경로를 탄다.
+
+> **개정(2026-06-04)**: 초기 설계는 `_TrackWorker`가 `detect_cuts`를 재호출했다(결정적이므로 정합으로 판단). 그러나 ① 동일 구간 이중 감지(성능 낭비)이고, ② scenedetect 결과가 비결정적이거나 입력이 미세하게 달라지면 샷 개수가 바뀌어 `selections`의 `shot_index`가 `validate_selections` 범위를 벗어날 수 있는 **잠재적 정합성 위험**(단일 진실 소스 부재)이 있었다. 이를 제거하기 위해 `_DetectWorker`가 방출한 `cut_frames`를 `VideoMainWindow._cut_frames`에 보관했다가 `_TrackWorker`에 주입한다. 영상·구간 변경 시 `_enter_single_mode`가 `_cut_frames`를 무효화한다.
 
 이 분리로 사용자는 수초 내에 후보 박스 UI를 확인하고 선택할 수 있으며, SAM2 대기는 선택 완료 후에만 발생한다.
 
@@ -83,7 +86,7 @@
 
 ### 부정적 영향 / 트레이드오프
 
-- **워커 2개로 코드량 증가**: `_DetectWorker`·`_TrackWorker` 각각의 스레드 관리 코드와 시그널-슬롯 연결이 단일 워커 대비 늘어난다. 결정적 `detect_cuts` 재호출(`_TrackWorker` 내부)이 중복이나 성능 영향은 무시 수준이다.
+- **워커 2개로 코드량 증가**: `_DetectWorker`·`_TrackWorker` 각각의 스레드 관리 코드와 시그널-슬롯 연결이 단일 워커 대비 늘어난다. `cut_frames` 주입(개정 2026-06-04)으로 이중 감지·정합성 위험은 해소했으나, 윈도우가 `_cut_frames` 상태를 보관·무효화하는 책임이 추가된다.
 - **선택 UI 필수화**: 컷 있는 영상에서는 사용자가 컷별로 대상을 선택해야 추적이 시작된다. 자동 재매칭 단독 경로(선택 없이 바로 추적)는 군무에서 신뢰 불가하므로 의도적 제거다. 단일 인물 단순 컷에선 자동 재매칭 폴백이 여전히 동작한다(`track(selections=None)` 경로 무변경).
 - **`ShotChoice` VO 추가**: UI 레이어에 별도 선택 상태 타입이 생긴다. 변환 함수(`build_selections_from_choices`)와 쌍으로 관리해야 한다.
 
