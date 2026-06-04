@@ -2,7 +2,7 @@
 
 > 다른 PC / 다른 세션에서 이 프로젝트를 **끊김 없이 이어서 진행**하기 위한 안내서.
 > 스키마 버전: v2
-> 최종 업데이트: 2026-06-04 (Story 4 데스크톱 컷별 선택 UI **Task 4-2~4-6 완료 + 리뷰 후속 수정 → main 머지** — 캔버스 박스 오버레이·컷별 선택 패널·워커 2분할(_DetectWorker/_TrackWorker selections)·모드 자동전환·ADR 0016·GPU 게이트 체크리스트. 머지 전 리뷰 [중요] 1건 해소: `detect_cuts` 이중 실행 제거(`_DetectWorker` 감지 `cut_frames`를 `_TrackWorker`에 주입, 단일 진실 소스). 헤드리스 **678 테스트** 통과. 실 GPU 재현은 Colab 대기)
+> 최종 업데이트: 2026-06-04 (**🎯 AC-06 10fps 목표 달성** — Story 4 컷선택 UI 머지 후속 정리 + 비디오 추적 가속/정합 대량 작업: ① `detect_cuts` 이중 실행 제거(`_DetectWorker`→`_TrackWorker` 주입) ② **fp16 채택**(2.7×, ADR 0017) ③ **EdgeTAM 비디오 백엔드 채택**(1.9→**13.5fps**, AC-01 100% 유지, ADR 0018) ④ device cuda 기본 hiera-small 정합 ⑤ 업스케일 결합(app, UI 배선 백로그) ⑥ 타임라인 mm:ss ⑦ 오디오 동기 제외(GIF가 목적) ⑧ 문서 정합화. 헤드리스 **726 테스트** 통과. 다음: **RIFE 보간 PoC**(부드러운 슬로우, GPU). 실 GPU 재현은 Colab 대기)
 
 ---
 
