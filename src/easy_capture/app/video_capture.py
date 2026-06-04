@@ -45,6 +45,7 @@ from easy_capture.core.tracking.cut_selection import (
     index_selections_by_shot,
     validate_selections,
 )
+from easy_capture.core.upscale.backend import UpscaleBackend
 from easy_capture.core.tracking.gap_policy import build_output_indices
 from easy_capture.core.tracking.rematch import RematchResult, select_best_match
 from easy_capture.core.tracking.shot_split import split_into_shots
@@ -284,8 +285,15 @@ class VideoCaptureUseCase:
         boxes: list[CropBox],
         target: tuple[str, VideoExportConfig],
         result: TrackResult | None = None,
+        upscaler: UpscaleBackend | None = None,
     ) -> None:
-        """gap_policy → 프레임 선택 → crop_frames → encode_frames.
+        """gap_policy → 프레임 선택 → crop_frames → (upscale) → encode_frames.
+
+        WHY upscaler: 이미지 모드 export(upscaler=)와 대칭(DIP — UpscaleBackend
+          Protocol에만 의존). None이면 기존 경로 그대로(무회귀). 주어지면 crop_frames
+          직후 각 크롭을 동일 배율로 확대해 encode한다 — 전 크롭 동일 크기·동일 배율
+          이므로 업스케일 후에도 균일 크기가 유지돼 GIF/MP4 인코딩 정합이 깨지지 않는다.
+        WHY 매개변수: 키워드 기본 None으로 기존 호출(4인자)을 깨지 않는다(무회귀).
 
         WHY 좌표계 한정(BACKGROUND 전제):
           build_output_indices가 crops를 만들고 나서 config.trim·segments가 그 crops
@@ -302,6 +310,8 @@ class VideoCaptureUseCase:
         selected_frames = [frames[i] for i in indices]
         selected_boxes = [boxes[i] for i in indices]
         crops = crop_frames(selected_frames, selected_boxes)
+        if upscaler is not None:
+            crops = _upscale_crops(crops, upscaler)
         encode_frames(crops, path, config)
 
     # ------------------------------------------------------------------
@@ -670,6 +680,17 @@ def _valid_flags_from_result(
     if result is None:
         return [True] * n_frames
     return [c is not None for c in result.centroids]
+
+
+def _upscale_crops(
+    crops: list[np.ndarray], upscaler: UpscaleBackend
+) -> list[np.ndarray]:
+    """각 크롭을 업스케일한다(무거움 — GPU Swin2SR).
+
+    WHY: 전 크롭이 동일 크기이고 배율이 고정이므로 업스케일 후에도 균일 크기가
+         유지돼 GIF/MP4 인코딩 정합(crop_frames 동일 크기 전제)이 깨지지 않는다.
+    """
+    return [upscaler.upscale(crop) for crop in crops]
 
 
 def _raise_if_all_empty(centroids: list) -> None:

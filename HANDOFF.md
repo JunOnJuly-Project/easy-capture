@@ -124,7 +124,12 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 2. ✅ **데스크톱 컷별 선택 UI**(Story 4 Task 4-2~4-6 완료 + 리뷰 후속 → **main 머지 완료**): 캔버스 박스 클릭 hit-test+패널 선택+워커 2분할+모드 자동전환+`detect_cuts` 이중 실행 해소. 헤드리스 678 테스트. **남은 것**: 실 GPU GUI 재현(Colab — `docs/plans/cut-selection-ui-gpu-gate.md` 체크리스트로 AC-01 100% 재현 확인).
 3. ✅ **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경 완료. Colab `app_verify`(셀 6) tiny→small, OOM 폴백 안내 정합화. Kaggle은 이미 small이라 OOM 안내만 정합. PoC 노트북(`gpu_poc`)은 historical이라 유지.
 4. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
-5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(일부 해소 — 아래 리뷰 제안 백로그 참조)
+5. **후속(v1.1 기능)**: 🔬 진행 중 —
+   - 🟡 **업스케일 결합**: app 핵심 완료(`video_capture.export(upscaler=)` — 이미지 모드 대칭, crop 후 동일 배율 확대, 무회귀 None, 2테스트). **남은 것**: video_window UI 토글+`_ExportWorker` upscaler 전달(GPU 필수라 우선순위 낮음).
+   - ⏳ **타임라인 mm:ss**: 순수 변환 함수+테이블 표시(CPU, 다음).
+   - ⏳ **오디오 동기**: 현재 `video_export`는 오디오 미처리(README "오디오 포함" 부정확). 패스through+슬로우 시간스트레칭(librosa) 필요(PoC 선행).
+   - ⏳ **RIFE 보간**: 부드러운 슬로우(GPU PoC 선행, 가장 큼).
+   - 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(아래 참조)
 
 ### 백로그
 - **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): ✅ **타당성 조사 완료** → [`docs/plans/ac06-fps-improvement.md`](docs/plans/ac06-fps-improvement.md). 결론: **1순위 fp16/bf16**(현재 `sam2_video_backend.py:74` fp32 고정 — 공짜에 가까운 이득, T4=fp16/최신=bf16, AC-01 재게이트 필수), **차순위 EdgeTAM**(transformers 5.10+ `EdgeTamVideoModel`·Apache 2.0·SAM2 video 동일 API — memory attention 병목 직격이나 T4 fps·box/negative·군무 정확도 미검증 → 노트북 측정 선결). 프레임 서브샘플은 정확도 리스크로 보류. ✅ **fp16 채택 완료**(Colab T4 실측, ADR 0017): float16이 **AC-01 100%·needs_correction 0 유지 + 2.67×**(1.92→**5.14fps**). bf16은 T4 무가속(0.95×) 미채택. `device.py SAM2_DTYPE_BY_DEVICE`(cuda=fp16/cpu=fp32)+`select_sam2_dtype`, router 주입, 백엔드 dtype+autocast, 단위 19테스트. - ✅ **device.py 모델 카탈로그 정합화 완료**: cuda 기본 `base-plus`→`hiera-small`(게이트·fp16 측정 통과 모델로 정합, ADR 0017). 데스크톱 cuda = small + fp16.
