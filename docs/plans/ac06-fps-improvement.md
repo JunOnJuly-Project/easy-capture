@@ -156,7 +156,21 @@
 - **측정 셀**(`poc/colab/easy_capture_app_verify.ipynb` 셀 8.5): dtype별 백엔드 재생성 → 2회차(모델 로드 제외) propagate fps + AC-01·needs_correction 동반 측정 + fp32 대비 배속·정확도 유지 판정. T4 bf16 미지원 자동 감지.
 - `router`는 **무변경**(기본 fp32). 측정으로 fp16 정확도(AC-01 100%·needs_correction 0)가 확인되면 그때 기본 상향.
 
-### 다음 (Colab T4)
-1. 게이트 군무 클립으로 셀 1~8 실행 후 **셀 8.5** 실행 → fp32/fp16 표 확보.
-2. fp16이 AC-01 100%·needs_correction 0 유지 + fps 향상이면 → `router`/`device.py` 기본 dtype을 fp16(T4)으로 상향 + 본 문서 측정치 기록.
-3. fp16으로 10fps 미달이면 → EdgeTAM(B) 노트북 PoC 측정 착수.
+### 측정 결과 (Colab T4, hiera-small, 컷별 선택, 군무 300f/컷3→4샷) — 2026-06-04
+
+| dtype | fps | fp32 대비 | AC-01 | needs_correction |
+|---|---|---|---|---|
+| float32 | 1.92 | 1.00× | 100% | 0 |
+| **float16** | **5.14** | **2.67×** | **100%** | **0** |
+| bfloat16 | 1.84 | 0.95× | 100% | 0 |
+
+- **fp16 채택**: 정확도 무손실(AC-01 100%·needs_correction 0) + **2.67× 가속**. → [ADR 0017](../adr/0017-fp16-mixed-precision.md).
+- bf16은 T4 무가속(0.95×)이라 미채택(조사 예측 일치). bf16 가속 GPU에선 백엔드 인자로 주입 가능.
+
+### 적용 (완료)
+- `device.py`: `SAM2_DTYPE_BY_DEVICE`(cuda=fp16/cpu=fp32) + `select_sam2_dtype`. `router`가 백엔드 생성 시 주입. 3 단위테스트.
+- **결과**: 데스크톱 비디오 추적 기본 cuda 경로가 fp16(2.67×)로 동작. cpu 무회귀(fp32).
+
+### 다음
+- **EdgeTAM(B) PoC**: fp16으로도 5.14fps라 목표 10fps 미달 → memory attention 경량화(EdgeTAM)로 추가 도약 측정(조사 §2-B·§5). fp16과 결합.
+- **device.py 카탈로그 정합화**(별도 결정): cuda 기본 `base-plus` vs 게이트 `small`.
