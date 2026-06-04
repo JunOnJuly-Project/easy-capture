@@ -13,6 +13,14 @@ SAM2_REPO_BY_DEVICE = {
     "cpu": "facebook/sam2.1-hiera-tiny",
 }
 
+# 디바이스별 추론 정밀도 (ADR 0017) — cuda 는 fp16(Colab T4 측정 AC-06 2.67×·
+# AC-01 100%·needs_correction 0 유지), cpu 는 fp32(autocast 미지원·무의미).
+# bf16 은 T4 하드웨어 가속이 없어 채택 안 함(측정 0.95×). 필요 시 백엔드 인자로 주입.
+SAM2_DTYPE_BY_DEVICE = {
+    "cuda": "float16",
+    "cpu": "float32",
+}
+
 
 def detect_device() -> str:
     """CUDA 가용 시 'cuda', 아니면 'cpu'. torch 미설치 시에도 안전하게 'cpu'."""
@@ -26,6 +34,14 @@ def detect_device() -> str:
 def select_sam2_repo(device: str) -> str:
     """디바이스에 맞는 SAM2 repo id."""
     return SAM2_REPO_BY_DEVICE.get(device, SAM2_REPO_BY_DEVICE["cpu"])
+
+
+def select_sam2_dtype(device: str) -> str:
+    """디바이스에 맞는 SAM2 추론 정밀도 문자열(ADR 0017).
+
+    cuda='float16'(fp16 가속), 그 외='float32'(안전 폴백, autocast no-op).
+    """
+    return SAM2_DTYPE_BY_DEVICE.get(device, "float32")
 
 
 def supports_video_tracking(device: str) -> bool:

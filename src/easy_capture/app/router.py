@@ -106,14 +106,15 @@ class AppRouter:
              이미지 모드 _build_usecase_factory와 동형(DRY 구조 계승).
         """
         from easy_capture.app.video_capture import VideoCaptureUseCase
-        from easy_capture.infra.device import select_sam2_repo
+        from easy_capture.infra.device import select_sam2_dtype, select_sam2_repo
         from easy_capture.infra.grounding_dino_backend import GroundingDinoBackend
         from easy_capture.infra.sam2_video_backend import Sam2VideoBackend
         from easy_capture.infra.video_io import open_source
 
         repo = select_sam2_repo(device)
+        dtype = select_sam2_dtype(device)  # cuda=fp16(AC-06 2.67×, ADR 0017)
         # 두 백엔드 모두 지연 로드(ADR 0007 계승) — 생성 자체는 가볍다
-        backend = Sam2VideoBackend(repo=repo, device=device)
+        backend = Sam2VideoBackend(repo=repo, device=device, dtype=dtype)
         detector = GroundingDinoBackend(device=device)
 
         def factory(path: str) -> VideoCaptureUseCase:
