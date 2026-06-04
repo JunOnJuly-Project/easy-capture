@@ -128,7 +128,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
    - 🟡 **업스케일 결합**: app 핵심 완료(`video_capture.export(upscaler=)` — 이미지 모드 대칭, crop 후 동일 배율 확대, 무회귀 None, 2테스트). **결정(2026-06-04): 백로그 유지** — 공개 API는 이미지 모드 대칭·테스트로 보호(죽은 코드 아님, reviewer 확인). **남은 것(다음 세션)**: video_window 업스케일 토글+배율 콤보+`_ExportWorker` upscaler 전달+router video upscaler_factory(GPU 필수, Colab 검증).
    - 🟢 **타임라인 mm:ss**: `ui/time_format`(frame↔mm:ss 순수 변환, 17테스트) + `segment_table` 시작/끝 SpinBox에 mm:ss suffix 표시(set_base_fps 연동, 4 offscreen 테스트). **남은 것**: video_window 구간/트림 SpinBox에도 적용(같은 함수 재사용) + 시각 타임라인(QGraphics, 후순위).
    - ❌ **오디오 동기 — 제외 결정**(2026-06-04): GIF가 최종 목적이라 오디오 불필요. MP4도 무음 유지. README·계획서 "오디오 포함/패스through" 표기를 "무음"으로 정정 완료(ADR 0011 무음 기준 유지).
-   - ⏳ **RIFE 보간**: 부드러운 슬로우(GIF 슬로우 품질 향상). GPU PoC 선행, 가장 큼.
+   - 🔬 **RIFE 보간 PoC 인프라**: 부드러운 슬로우(현재 프레임 복제=stutter → 중간 프레임 보간). 조사 완료 → [`docs/plans/rife-interpolation-poc.md`](docs/plans/rife-interpolation-poc.md): **1순위 RIFE(Practical-RIFE, MIT, torch만, 임의 timestep)**, transformers 미통합이라 GitHub 클론+가중치 방식. 통합설계 초안(`core/interpolate/InterpolationBackend` Protocol + `export(interpolator=)` crop 직후 주입, 복제↔보간 이중슬로우 방지). app_verify 노트북 셀 9.6(RIFE 설치/로드)·9.7(복제 vs 보간 육안+fps/VRAM) 추가. **다음(Colab T4)**: 셀 9.6 가중치 배치(README v4.25)·셀 9.7 측정 → 부드러움·아티팩트·비용 통과 시 정식 백엔드화(새 ADR). FILM(Apache)은 품질 미달 시 교체 후보.
    - 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(아래 참조)
 
 ### 백로그
