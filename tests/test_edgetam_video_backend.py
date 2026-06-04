@@ -23,14 +23,14 @@ def test_sam2_백엔드를_상속한다():
 
 def test_dtype_주입을_계승한다():
     backend = EdgetamVideoBackend(
-        repo="yonigozlan/edgetam-video-1", device="cuda", dtype="float16"
+        repo="yonigozlan/EdgeTAM-hf", device="cuda", dtype="float16"
     )
     assert backend._dtype == "float16"
     assert backend.device == "cuda"
 
 
 def test_기본_dtype은_float32_무회귀():
-    backend = EdgetamVideoBackend(repo="yonigozlan/edgetam-video-1", device="cpu")
+    backend = EdgetamVideoBackend(repo="yonigozlan/EdgeTAM-hf", device="cpu")
     assert backend._dtype == "float32"
 
 

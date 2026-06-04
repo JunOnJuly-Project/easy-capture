@@ -7,7 +7,8 @@ EdgeTAM(Meta, CVPR 2025)은 SAM2의 memory attention을 2D Spatial Perceiver로
 
 상태: PoC — Colab T4에서 fps·AC-01·box/negative 지원을 측정해 채택 여부 결정
       (docs/plans/ac06-fps-improvement.md §2-B·§5). transformers>=5.10 필요.
-라이선스: Apache 2.0(코드+체크포인트 yonigozlan/edgetam-video-1).
+라이선스: Apache 2.0. 체크포인트: yonigozlan/EdgeTAM-hf(public, transformers 호환).
+      (문서가 안내하는 yonigozlan/edgetam-video-1은 gated/미존재로 401.)
 """
 from __future__ import annotations
 

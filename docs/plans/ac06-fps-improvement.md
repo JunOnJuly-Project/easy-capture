@@ -56,7 +56,7 @@
 - **검증 필수**: 멀티샷 군무 게이트(AC-01 100%·needs_correction 0)가 fp16에서 유지되는지 재측정. 마스크 경계가 미세하게 흔들리면 crop 떨림으로 이어질 수 있다.
 
 #### B. EdgeTAM 경량 백엔드 — **차순위(중기)**
-- **현황(2025~2026)**: EdgeTAM(Meta, CVPR 2025 highlight)은 **2025-09-29 HuggingFace transformers에 정식 병합**됨. 클래스 `EdgeTamVideoModel`, **프로세서는 `Sam2VideoProcessor`를 재사용**, 체크포인트 `yonigozlan/edgetam-video-1`(또는 `yonigozlan/EdgeTAM-hf`). API가 SAM2 video와 **동일**: `init_video_session` → `add_inputs_to_inference_session` → `propagate_in_video_iterator` → `post_process_masks`(HF [edgetam_video 문서](https://huggingface.co/docs/transformers/en/model_doc/edgetam_video), transformers v5.10.1 소스).
+- **현황(2025~2026)**: EdgeTAM(Meta, CVPR 2025 highlight)은 **2025-09-29 HuggingFace transformers에 정식 병합**됨. 클래스 `EdgeTamVideoModel`, **프로세서는 `Sam2VideoProcessor`를 재사용**, 체크포인트 **`yonigozlan/EdgeTAM-hf`**(public·월1만+ 다운로드, 실측 사용). ⚠ 공식 문서가 예제로 쓰는 `yonigozlan/edgetam-video-1`은 **gated/미존재로 401**(2026-06 확인) — `EdgeTAM-hf`를 쓴다. API가 SAM2 video와 **동일**: `init_video_session` → `add_inputs_to_inference_session` → `propagate_in_video_iterator` → `post_process_masks`(HF [edgetam_video 문서](https://huggingface.co/docs/transformers/en/model_doc/edgetam_video), transformers v5.10.1 소스).
 - **속도**: iPhone 15 Pro Max 16fps(SAM2 대비 22×, on-device). **memory attention을 2D Spatial Perceiver로 경량화**해 SAM2의 진짜 병목을 친다 → GPU에서도 이득 기대(단 **T4 fps 실측은 공개치 없음, 추정**).
 - **정확도**: DAVIS 87.7 / MOSE 70.0 / SA-V val 72.3 / test 71.7 J&F로 SAM2에 "comparable". 다만 본 프로젝트는 **군무 밀착 분리에 hiera-small이 필요**했던 이력(ADR 0015 R1) → EdgeTAM(경량)이 그 난도를 통과할지는 **별도 게이트 측정 필수**.
 - **추상화 적합성**: `VideoSegmentationBackend` Protocol을 그대로 구현하는 신규 infra(`infra/edgetam_video_backend.py`) 1개 추가 + router 분기. ADR 0010 opaque session·ISP 구조가 정확히 이 교체를 위해 설계됨(ADR 0010 "새 경량 이미지 백엔드 추가 시 구현 의무 없음" 정신의 비디오판). **`add_box`/negative 지원 여부 확인이 선결**(현 게이트가 box+negative 전제).
@@ -123,7 +123,7 @@
   4. **통과 기준**: AC-01 100% · needs_correction 0 유지 + fps 향상.
 - **B. EdgeTAM**:
   1. `transformers>=5.10` 설치 셀.
-  2. `EdgeTamVideoModel.from_pretrained("yonigozlan/edgetam-video-1")` + `Sam2VideoProcessor.from_pretrained(...)`.
+  2. `EdgeTamVideoModel.from_pretrained("yonigozlan/EdgeTAM-hf")` + `Sam2VideoProcessor.from_pretrained(...)`.
   3. **box prompt(`input_boxes`)·negative point 지원 여부**를 단건으로 먼저 확인(군무 게이트 전제). 미지원이면 point-only로 한정해 정확도 별도 평가.
   4. 동일 군무 클립으로 (fps, AC-01, needs_correction) 측정 → SAM2-small과 표로 대비.
   5. fp16까지 결합 측정(A×B).
