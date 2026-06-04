@@ -100,21 +100,25 @@ class AppRouter:
     def _build_video_usecase_factory(self, device: str):
         """파일 경로를 받아 VideoCaptureUseCase를 생성하는 팩토리를 반환한다.
 
-        WHY: 비디오 백엔드(Sam2VideoBackend) + 재검출 백엔드(GroundingDinoBackend)를
+        WHY: 비디오 백엔드(EdgetamVideoBackend) + 재검출 백엔드(GroundingDinoBackend)를
              둘 다 조립해 detector 파라미터로 주입한다(ADR 0012, [중요] 2 수정).
              두 백엔드 모두 지연 로드이므로 생성 자체는 가볍다(ADR 0007 계승).
              이미지 모드 _build_usecase_factory와 동형(DRY 구조 계승).
+        WHY EdgeTAM: Colab T4 측정 13.5fps(SAM2-small fp16의 2.6×, AC-01 100%·
+             needs_correction 0 유지)로 AC-06 10fps 달성(ADR 0018). EdgeTAM은 SAM2
+             video API 호환이라 Sam2VideoBackend 상속본으로 동일 경로를 탄다.
         """
         from easy_capture.app.video_capture import VideoCaptureUseCase
-        from easy_capture.infra.device import select_sam2_dtype, select_sam2_repo
+        from easy_capture.infra.device import VIDEO_TRACKING_REPO, select_sam2_dtype
+        from easy_capture.infra.edgetam_video_backend import EdgetamVideoBackend
         from easy_capture.infra.grounding_dino_backend import GroundingDinoBackend
-        from easy_capture.infra.sam2_video_backend import Sam2VideoBackend
         from easy_capture.infra.video_io import open_source
 
-        repo = select_sam2_repo(device)
-        dtype = select_sam2_dtype(device)  # cuda=fp16(AC-06 2.67×, ADR 0017)
+        dtype = select_sam2_dtype(device)  # cuda=fp16(ADR 0017)
         # 두 백엔드 모두 지연 로드(ADR 0007 계승) — 생성 자체는 가볍다
-        backend = Sam2VideoBackend(repo=repo, device=device, dtype=dtype)
+        backend = EdgetamVideoBackend(
+            repo=VIDEO_TRACKING_REPO, device=device, dtype=dtype
+        )
         detector = GroundingDinoBackend(device=device)
 
         def factory(path: str) -> VideoCaptureUseCase:

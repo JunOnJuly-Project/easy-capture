@@ -12,7 +12,7 @@ dependencies = [
     "PySide6",
     "torch",
     "torchvision",
-    "transformers>=4.55",
+    "transformers>=5.10",
     "scenedetect[opencv]",
     "av",
     "imageio",

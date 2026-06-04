@@ -24,6 +24,11 @@ SAM2_DTYPE_BY_DEVICE = {
     "cpu": "float32",
 }
 
+# 비디오 추적 기본 백엔드 모델 (ADR 0018) — EdgeTAM(transformers 호환, Apache 2.0).
+# Colab T4 측정: hiera-small fp16(5.1fps) 대비 EdgeTAM fp16 13.5fps(AC-01 100%·
+# needs_correction 0 유지)로 목표 10fps 달성. SAM2 video API 호환(EdgetamVideoBackend).
+VIDEO_TRACKING_REPO = "yonigozlan/EdgeTAM-hf"
+
 
 def detect_device() -> str:
     """CUDA 가용 시 'cuda', 아니면 'cpu'. torch 미설치 시에도 안전하게 'cpu'."""
