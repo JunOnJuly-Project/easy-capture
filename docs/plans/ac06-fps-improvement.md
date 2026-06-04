@@ -143,3 +143,20 @@
 3. **큰 도약은 EdgeTAM(B)**: 이미 transformers 5.10+에 `EdgeTamVideoModel`로 병합(Apache 2.0, SAM2 video와 동일 API, 프로세서 재사용)되어 `VideoSegmentationBackend` 추상화에 깔끔히 끼울 수 있다. 단 **T4 fps·box/negative·군무 정확도는 미검증("추정")** → 노트북 측정이 선결.
 4. **프레임 서브샘플(C)은 보류**: SAM2 연속 전파 구조상 정확도 리스크가 fps 이득보다 크다. 입력 다운스케일도 1024 인코딩 때문에 이득이 작다.
 5. **부수 정합화**: `device.py`의 cuda 기본이 `base-plus`인데 게이트는 `small`. fps 작업 시 기본 모델 카탈로그도 함께 검토.
+
+---
+
+## 7. 구현 진행 (실측 준비)
+
+> 2026-06-04 — 1순위(A. fp16/bf16) 실측을 위한 인프라 추가. **측정 자체는 Colab T4에서 수행(대기).**
+
+### 완료
+- **백엔드 dtype 주입**(`infra/sam2_video_backend.py`): 생성자 `dtype="float32"` 인자 추가(기본 무회귀). `init_session(dtype=_resolve_torch_dtype(...))` + `propagate`를 `_autocast_context`로 감쌌다. fp32·cpu는 `nullcontext`(no-op), fp16/bf16+cuda면 `torch.autocast`. `_validate_dtype`로 생성 시 조기 검증.
+- **단위 테스트**(`tests/test_sam2_video_backend_dtype.py`, 16개): dtype 검증·매핑·autocast 분기(CPU torch로 검증). 실 추론은 노트북 후행.
+- **측정 셀**(`poc/colab/easy_capture_app_verify.ipynb` 셀 8.5): dtype별 백엔드 재생성 → 2회차(모델 로드 제외) propagate fps + AC-01·needs_correction 동반 측정 + fp32 대비 배속·정확도 유지 판정. T4 bf16 미지원 자동 감지.
+- `router`는 **무변경**(기본 fp32). 측정으로 fp16 정확도(AC-01 100%·needs_correction 0)가 확인되면 그때 기본 상향.
+
+### 다음 (Colab T4)
+1. 게이트 군무 클립으로 셀 1~8 실행 후 **셀 8.5** 실행 → fp32/fp16 표 확보.
+2. fp16이 AC-01 100%·needs_correction 0 유지 + fps 향상이면 → `router`/`device.py` 기본 dtype을 fp16(T4)으로 상향 + 본 문서 측정치 기록.
+3. fp16으로 10fps 미달이면 → EdgeTAM(B) 노트북 PoC 측정 착수.

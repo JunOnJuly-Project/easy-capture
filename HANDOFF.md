@@ -127,7 +127,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(일부 해소 — 아래 리뷰 제안 백로그 참조)
 
 ### 백로그
-- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): ✅ **타당성 조사 완료** → [`docs/plans/ac06-fps-improvement.md`](docs/plans/ac06-fps-improvement.md). 결론: **1순위 fp16/bf16**(현재 `sam2_video_backend.py:74` fp32 고정 — 공짜에 가까운 이득, T4=fp16/최신=bf16, AC-01 재게이트 필수), **차순위 EdgeTAM**(transformers 5.10+ `EdgeTamVideoModel`·Apache 2.0·SAM2 video 동일 API — memory attention 병목 직격이나 T4 fps·box/negative·군무 정확도 미검증 → 노트북 측정 선결). 프레임 서브샘플은 정확도 리스크로 보류. **다음**: app_verify 노트북에 로드/전파 분리 측정 셀 추가 → A(fp16) 측정.
+- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): ✅ **타당성 조사 완료** → [`docs/plans/ac06-fps-improvement.md`](docs/plans/ac06-fps-improvement.md). 결론: **1순위 fp16/bf16**(현재 `sam2_video_backend.py:74` fp32 고정 — 공짜에 가까운 이득, T4=fp16/최신=bf16, AC-01 재게이트 필수), **차순위 EdgeTAM**(transformers 5.10+ `EdgeTamVideoModel`·Apache 2.0·SAM2 video 동일 API — memory attention 병목 직격이나 T4 fps·box/negative·군무 정확도 미검증 → 노트북 측정 선결). 프레임 서브샘플은 정확도 리스크로 보류. ✅ **fp16 실측 인프라 완료**: 백엔드 `dtype` 주입(`sam2_video_backend.py` — 기본 fp32 무회귀, fp16/bf16+cuda autocast)·단위 16테스트·app_verify 셀 8.5(dtype별 로드/전파 분리 측정+AC-01 동반). router 무변경. **다음(Colab T4 대기)**: 셀 8.5로 fp32/fp16 표 확보 → fp16이 AC-01 100%·needs_correction 0 유지 시 router 기본 fp16 상향.
 - **device.py 모델 카탈로그 정합화 검토**: `infra/device.py:12` cuda 기본이 `hiera-base-plus`인데 GPU 게이트는 `hiera-small`로 통과(base-plus가 더 무거움) → 데스크톱 기본을 small로 맞출지 결정 필요(fps 작업과 연계).
 
 ### 백로그(리뷰 [제안])
