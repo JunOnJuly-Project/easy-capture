@@ -28,14 +28,24 @@ class Sam2VideoBackend:
     실추론은 GPU 환경(Colab) 후행 검증. 코드만 PoC 패턴대로 정확히 작성.
     """
 
-    def __init__(self, repo: str, device: str) -> None:
-        """repo·device 보관만. 모델은 아직 로드하지 않는다(지연).
+    def __init__(self, repo: str, device: str, dtype: str = "float32") -> None:
+        """repo·device·dtype 보관만. 모델은 아직 로드하지 않는다(지연).
 
-        WHY: 모델 로드(~수 GB)는 UI 표시 이후로 미뤄 UX 응답성을 보장한다.
+        Args:
+            repo:   transformers Hub ID (예: facebook/sam2.1-hiera-small).
+            device: 추론 디바이스 ("cuda"/"cpu").
+            dtype:  추론 정밀도 "float32"(기본)/"float16"/"bfloat16". fp32가 아니면
+                    init_session·propagate에 mixed precision을 적용한다(AC-06 fps).
+
+        WHY 지연: 모델 로드(~수 GB)는 UI 표시 이후로 미뤄 UX 응답성을 보장한다.
              Sam2ImageBackend._ensure_loaded 패턴을 그대로 계승한다.
+        WHY dtype 기본 float32: 기존 동작 무회귀. 측정으로 fp16/bf16 정확도(AC-01)가
+             확인되면 router 기본을 상향한다(docs/plans/ac06-fps-improvement.md).
         """
+        _validate_dtype(dtype)
         self.device = device
         self._repo = repo
+        self._dtype = dtype
         self._model = None
         self._processor = None
         # 원본 프레임 크기 — init_session에서 기록, _extract_mask에서 사용
@@ -71,7 +81,7 @@ class Sam2VideoBackend:
         session = self._processor.init_video_session(
             video=frames,
             inference_device=self.device,
-            dtype=torch.float32,
+            dtype=_resolve_torch_dtype(self._dtype),
         )
         return session
 
@@ -154,17 +164,32 @@ class Sam2VideoBackend:
 
         Returns:
             프레임별 bool dtype HxW numpy 배열 리스트.
+
+        WHY autocast: dtype이 fp16/bf16이면 propagate를 autocast로 감싸 mixed
+             precision 추론을 적용한다(AC-06 fps). fp32·cpu면 no-op(무회귀).
         """
         import torch  # 지연 import
 
         masks: list[np.ndarray] = []
-        with torch.inference_mode():
+        with torch.inference_mode(), self._autocast_context(torch):
             for out in self._model.propagate_in_video_iterator(
                 session, start_frame_idx=0
             ):
                 mask = self._extract_mask(out)
                 masks.append(mask)
         return masks
+
+    def _autocast_context(self, torch):
+        """dtype에 맞는 autocast 컨텍스트를 반환한다(fp32·cpu면 no-op).
+
+        WHY: fp32는 autocast가 불필요(무회귀)하고, cpu autocast는 fp16 미지원이라
+             의미가 없으므로 nullcontext로 우회한다. fp16/bf16 + cuda에서만 적용.
+        """
+        import contextlib
+
+        if self._dtype == _DTYPE_FLOAT32 or self.device == _DEVICE_CPU:
+            return contextlib.nullcontext()
+        return torch.autocast(self.device, dtype=_resolve_torch_dtype(self._dtype))
 
     # ------------------------------------------------------------------
     # 내부 메서드
@@ -216,6 +241,39 @@ class Sam2VideoBackend:
 # ---------------------------------------------------------------------------
 # 내부 헬퍼
 # ---------------------------------------------------------------------------
+
+# 추론 정밀도 — init_session·propagate 분기 상수(매직스트링 금지).
+_DTYPE_FLOAT32 = "float32"
+_VALID_DTYPES = (_DTYPE_FLOAT32, "float16", "bfloat16")
+_DEVICE_CPU = "cpu"
+
+
+def _validate_dtype(dtype: str) -> None:
+    """dtype이 지원 목록(float32/float16/bfloat16) 안인지 검증한다(순수).
+
+    위반 시 한국어 ValueError를 발생시킨다(torch 비의존 — 생성자 조기 검증용).
+    """
+    if dtype not in _VALID_DTYPES:
+        raise ValueError(
+            f"지원하지 않는 dtype '{dtype}'. "
+            f"{'/'.join(_VALID_DTYPES)} 중 하나여야 합니다."
+        )
+
+
+def _resolve_torch_dtype(dtype: str):
+    """dtype 문자열을 torch.dtype으로 변환한다(torch 지연 import).
+
+    WHY: infra만 torch를 의존한다(router/UI는 문자열만 전달 — 경계 유지).
+    """
+    import torch
+
+    mapping = {
+        _DTYPE_FLOAT32: torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+    return mapping[dtype]
+
 
 # SAM2 입력 라벨 — transformers add_inputs 관례(1=전경/positive, 0=배경/negative).
 _LABEL_POSITIVE = 1
