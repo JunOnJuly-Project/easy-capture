@@ -127,8 +127,8 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 5. **후속**: 오디오 동기(H4)·업스케일 결합·타임라인 / 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(일부 해소 — 아래 리뷰 제안 백로그 참조)
 
 ### 백로그
-- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): ✅ **타당성 조사 완료** → [`docs/plans/ac06-fps-improvement.md`](docs/plans/ac06-fps-improvement.md). 결론: **1순위 fp16/bf16**(현재 `sam2_video_backend.py:74` fp32 고정 — 공짜에 가까운 이득, T4=fp16/최신=bf16, AC-01 재게이트 필수), **차순위 EdgeTAM**(transformers 5.10+ `EdgeTamVideoModel`·Apache 2.0·SAM2 video 동일 API — memory attention 병목 직격이나 T4 fps·box/negative·군무 정확도 미검증 → 노트북 측정 선결). 프레임 서브샘플은 정확도 리스크로 보류. ✅ **fp16 채택 완료**(Colab T4 실측, ADR 0017): float16이 **AC-01 100%·needs_correction 0 유지 + 2.67×**(1.92→**5.14fps**). bf16은 T4 무가속(0.95×) 미채택. `device.py SAM2_DTYPE_BY_DEVICE`(cuda=fp16/cpu=fp32)+`select_sam2_dtype`, router 주입, 백엔드 dtype+autocast, 단위 19테스트. **다음**: 목표 10fps 미달(5.14)이라 **EdgeTAM(B) PoC** 측정(fp16 결합) / device 카탈로그(base-plus vs small) 정합화 검토.
-- **device.py 모델 카탈로그 정합화 검토**: `infra/device.py:12` cuda 기본이 `hiera-base-plus`인데 GPU 게이트는 `hiera-small`로 통과(base-plus가 더 무거움) → 데스크톱 기본을 small로 맞출지 결정 필요(fps 작업과 연계).
+- **AC-06 2.0fps fps 개선**(목표 10 미달 — SAM2 비용): ✅ **타당성 조사 완료** → [`docs/plans/ac06-fps-improvement.md`](docs/plans/ac06-fps-improvement.md). 결론: **1순위 fp16/bf16**(현재 `sam2_video_backend.py:74` fp32 고정 — 공짜에 가까운 이득, T4=fp16/최신=bf16, AC-01 재게이트 필수), **차순위 EdgeTAM**(transformers 5.10+ `EdgeTamVideoModel`·Apache 2.0·SAM2 video 동일 API — memory attention 병목 직격이나 T4 fps·box/negative·군무 정확도 미검증 → 노트북 측정 선결). 프레임 서브샘플은 정확도 리스크로 보류. ✅ **fp16 채택 완료**(Colab T4 실측, ADR 0017): float16이 **AC-01 100%·needs_correction 0 유지 + 2.67×**(1.92→**5.14fps**). bf16은 T4 무가속(0.95×) 미채택. `device.py SAM2_DTYPE_BY_DEVICE`(cuda=fp16/cpu=fp32)+`select_sam2_dtype`, router 주입, 백엔드 dtype+autocast, 단위 19테스트. **다음**: 목표 10fps 미달(5.14)이라 **EdgeTAM(B) PoC** 측정(fp16 결합).
+- ✅ **device.py 모델 카탈로그 정합화 완료**: cuda 기본 `base-plus`→`hiera-small`(게이트·fp16 측정 통과 모델로 정합, ADR 0017). 데스크톱 cuda = small + fp16.
 
 ### 백로그(리뷰 [제안])
 - 미리보기 스크럽(prev/next), 클램프 경고 확인 다이얼로그, segment_logic 물리 분리, GIF fallback `1000/12.0`→상수화.

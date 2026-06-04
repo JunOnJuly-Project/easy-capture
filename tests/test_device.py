@@ -25,6 +25,11 @@ def test_select_repo_cpu_is_tiny():
     assert "tiny" in select_sam2_repo("cpu")
 
 
+def test_select_repo_cuda_is_small():
+    # 게이트·fp16 측정이 small로 통과 → 데스크톱 cuda 기본도 small 정합(ADR 0017)
+    assert "small" in select_sam2_repo("cuda")
+
+
 def test_select_repo_differs_by_device():
     assert select_sam2_repo("cuda") != select_sam2_repo("cpu")
 

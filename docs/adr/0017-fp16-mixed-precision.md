@@ -52,4 +52,4 @@ AC-06(GPU 처리 속도)이 `hiera-small` + 컷별 선택에서 **2.0 fps**로 �
 
 ## 후속
 - EdgeTAM(Apache 2.0, transformers `EdgeTamVideoModel`) PoC 측정 — fp16과 결합 시 10 fps 도달 가능성(조사 §2-B, §5).
-- `device.py` 모델 카탈로그 정합화 검토(cuda 기본 `base-plus` vs 게이트 `small`) — 별도 결정.
+- ✅ **`device.py` 모델 카탈로그 정합화 완료**(2026-06-04): cuda 기본을 `base-plus`→`hiera-small`로 변경. 게이트·fp16 측정이 모두 small로 통과했으므로 검증된 모델을 기본으로 정합.

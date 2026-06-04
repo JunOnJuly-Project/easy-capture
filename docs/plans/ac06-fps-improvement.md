@@ -173,4 +173,6 @@
 
 ### 다음
 - **EdgeTAM(B) PoC**: fp16으로도 5.14fps라 목표 10fps 미달 → memory attention 경량화(EdgeTAM)로 추가 도약 측정(조사 §2-B·§5). fp16과 결합.
-- **device.py 카탈로그 정합화**(별도 결정): cuda 기본 `base-plus` vs 게이트 `small`.
+
+### 적용 (완료) — device.py 카탈로그 정합화
+- ✅ cuda 기본 모델을 `base-plus`→`hiera-small`로 변경(게이트·fp16 측정이 small로 통과). 데스크톱 cuda 경로가 검증된 small + fp16으로 동작.

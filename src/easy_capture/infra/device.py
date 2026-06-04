@@ -7,9 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# 디바이스별 기본 SAM2 가중치 (CPU 는 가장 가벼운 tiny)
+# 디바이스별 기본 SAM2 가중치
+# WHY cuda=small: 멀티샷 군무 GPU 게이트(AC-01 100%·needs_correction 0)와 fp16 측정
+#   (ADR 0017)이 모두 hiera-small로 통과했다. base-plus는 더 무거운데(VRAM·속도)
+#   게이트 미검증이라, 검증된 small을 기본으로 정합화한다. CPU는 가장 가벼운 tiny.
 SAM2_REPO_BY_DEVICE = {
-    "cuda": "facebook/sam2.1-hiera-base-plus",
+    "cuda": "facebook/sam2.1-hiera-small",
     "cpu": "facebook/sam2.1-hiera-tiny",
 }
 
