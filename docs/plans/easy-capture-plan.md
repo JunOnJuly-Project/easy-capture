@@ -32,7 +32,7 @@ scope creep 방지를 위해 v1.0 경계를 명시한다. Out 항목도 **아키
 | 교정 | **수동 교정**(미리보기 중 특정 프레임 재선택 → 부분 재추적) | — |
 | 크롭 | centroid 중심 + 떨림완화(기본 ON) + 종횡비 잠금(1:1/9:16/16:9/자유) | 워터마크 자동 회피 |
 | 갭 채우기 | 3방식(배경/컷/프리즈, 기본=BACKGROUND) | — |
-| 출력 | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(짝수해상도·yuv420p·오디오 패스through) | SNS 플랫폼별 자동 압축/포맷 변환 프리셋 |
+| 출력 | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(짝수해상도·yuv420p·**무음**) | 오디오(GIF가 주 목적이라 제외), SNS 플랫폼별 자동 압축/포맷 변환 프리셋 |
 | 업스케일 | Real-ESRGAN/SwinIR 2종(2x/4x) 옵션 | temporal smoothing(플리커 저감), 직캠 왜곡보정 |
 | 다중 멤버 | 세션·디코드 캐시 재사용으로 반복 비용 완화 | 같은 구간 다중 멤버 배치 일괄 처리 |
 | 온보딩 | 단일 흐름 + 합리적 기본값 + 툴팁 | simple/advanced 마법사 |
@@ -52,7 +52,7 @@ scope creep 방지를 위해 v1.0 경계를 명시한다. Out 항목도 **아키
 | 비디오 입력/디코드 | PyAV(PTS·VFR) + ffprobe. OpenCV 보조 |
 | 색공간 | BGR/limited → RGB BT.709 full 정규화, 출력 색공간 태깅 |
 | GIF | imageio/Pillow + 동적 팔레트·디더링·파일크기 예측 |
-| MP4 | libx264 yuv420p, 짝수 해상도 정렬, 오디오 mux(ffmpeg) |
+| MP4 | libx264 yuv420p, 짝수 해상도 정렬, 무음(GIF가 주 출력 — 오디오 제외) |
 | 디바이스 | CUDA 자동 감지 → CPU 폴백 |
 
 ---

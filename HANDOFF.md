@@ -127,8 +127,8 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 5. **후속(v1.1 기능)**: 🔬 진행 중 —
    - 🟡 **업스케일 결합**: app 핵심 완료(`video_capture.export(upscaler=)` — 이미지 모드 대칭, crop 후 동일 배율 확대, 무회귀 None, 2테스트). **남은 것**: video_window UI 토글+`_ExportWorker` upscaler 전달(GPU 필수라 우선순위 낮음).
    - 🟢 **타임라인 mm:ss**: `ui/time_format`(frame↔mm:ss 순수 변환, 17테스트) + `segment_table` 시작/끝 SpinBox에 mm:ss suffix 표시(set_base_fps 연동, 4 offscreen 테스트). **남은 것**: video_window 구간/트림 SpinBox에도 적용(같은 함수 재사용) + 시각 타임라인(QGraphics, 후순위).
-   - ⏳ **오디오 동기**: 현재 `video_export`는 오디오 미처리(README "오디오 포함" 부정확). 패스through+슬로우 시간스트레칭(librosa) 필요(PoC 선행).
-   - ⏳ **RIFE 보간**: 부드러운 슬로우(GPU PoC 선행, 가장 큼).
+   - ❌ **오디오 동기 — 제외 결정**(2026-06-04): GIF가 최종 목적이라 오디오 불필요. MP4도 무음 유지. README·계획서 "오디오 포함/패스through" 표기를 "무음"으로 정정 완료(ADR 0011 무음 기준 유지).
+   - ⏳ **RIFE 보간**: 부드러운 슬로우(GIF 슬로우 품질 향상). GPU PoC 선행, 가장 큼.
    - 🔴 CUT/FREEZE×트림 좌표계(잠복, ADR 0013) / reviewer [제안] 백로그(아래 참조)
 
 ### 백로그

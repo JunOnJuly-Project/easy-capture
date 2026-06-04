@@ -21,7 +21,7 @@
 - ✅ **마스크 정제**: SAM2 box 프롬프트(전신 bbox) + 최대 연결성분(largest_component)으로 1인 클로즈업 마스크 확보(ADR 0014)
 - ✅ **슬로우모션·트림·루프**: 구간별 가변 재생속도(슬로우/패스트) + 출력 구간 트림 + GIF 루프 횟수(ADR 0013)
 - ✅ **크롭**: 피사체 bbox 중심 + 떨림 완화 + 종횡비 잠금(1:1/9:16/16:9)
-- ✅ **출력**: PNG/JPG · GIF(팔레트·크기예측·per-frame duration) · MP4(오디오 포함)
+- ✅ **출력**: PNG/JPG · GIF(팔레트·크기예측·per-frame duration) · MP4(무음 — GIF가 주 목적)
 - ✅ **업스케일(옵션)**: SwinIR(기본) / Real-ESRGAN
 - ✅ **경량 추적 백엔드(EdgeTAM)**: AC-06 10fps 목표 달성(13.5fps, ADR 0018)
 - 🔜 **부드러운 슬로우(RIFE 보간)**: v1.1
