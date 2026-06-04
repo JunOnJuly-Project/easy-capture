@@ -2,10 +2,10 @@
 
 > 뮤직비디오·직캠 등 동영상에서 **특정 오브젝트(인물/사물)를 중심으로 자동 크롭**하여 스크린샷(짤)과 GIF(움짤)를 쉽게 만드는 로컬 데스크톱 프로그램.
 
-클릭 한 번으로 추적 대상을 지정하면, SAM2 기반 추적으로 그 사람/사물을 따라가며 원하는 범위를 잘라 캡처·GIF·MP4 로 내보낸다.
+클릭 한 번으로 추적 대상을 지정하면, EdgeTAM(SAM2 호환) 기반 추적으로 그 사람/사물을 따라가며 원하는 범위를 잘라 캡처·GIF·MP4 로 내보낸다.
 
 > **현재 상태: 구현 중 — 이미지 모드 완성 + 비디오 모드 핵심 기능 완료 + GPU 실검증 진행.**
-> 이미지: 클릭→SAM2(CPU)→크롭→PNG/JPG + 종횡비·크기·업스케일(SwinIR). 비디오: 구간 추적→컷별 오브젝트 선택→크롭→GIF/MP4 + 슬로우모션·트림·루프(가변 재생속도, ADR 0013)·마스크 정제(box 프롬프트+largest_component, ADR 0014). GPU(Colab T4) 실검증 완료 — 추적 유지율 100%, 멀티샷은 컷별 명시 선택으로 정확도 확보. GPU 추적 속도는 **EdgeTAM fp16 ≈13.5fps로 AC-06 10fps 목표 달성**(ADR 0017 fp16·0018 EdgeTAM, SAM2-small fp16 대비 2.6×).
+> 이미지: 클릭→SAM2(CPU)→크롭→PNG/JPG + 종횡비·크기·업스케일(SwinIR). 비디오: 구간 추적→컷별 오브젝트 선택→크롭→GIF/MP4 + 슬로우모션·트림·루프(가변 재생속도, ADR 0013)·마스크 정제(box 프롬프트+negative point, ADR 0014/0015). GPU(Colab T4) 실검증 완료 — 추적 유지율 100%, 멀티샷은 컷별 명시 선택으로 정확도 확보. GPU 추적 속도는 **EdgeTAM fp16 ≈13.5fps로 AC-06 10fps 목표 달성**(ADR 0017 fp16·0018 EdgeTAM, SAM2-small fp16 대비 2.6×).
 
 ---
 
@@ -18,7 +18,7 @@
 - ✅ **추적**: EdgeTAM(SAM2 video API 호환, fp16, 13.5fps) 로 후속 프레임 자동 전파, occlusion(소실) 갭 정책(컷/배경/프리즈)
 - ✅ **샷 경계 재추적**: 컷이 바뀌어도 같은 인물 자동 재매칭(폴백)
 - ✅ **수동 교정 = 컷별 오브젝트 선택**: 각 컷의 추적 대상을 사용자가 직접 지정해 컷별 재추적(자동 재매칭이 멀티샷에서 한계 → 명시 선택으로 정확도 확보, ADR 0006 보강)
-- ✅ **마스크 정제**: SAM2 box 프롬프트(전신 bbox) + 최대 연결성분(largest_component)으로 1인 클로즈업 마스크 확보(ADR 0014)
+- ✅ **마스크 정제**: SAM2 box 프롬프트(전신 bbox) + negative point(옆 멤버 배제)로 1인 클로즈업 마스크 확보(ADR 0014/0015 — largest_component는 효과 한계로 철회)
 - ✅ **슬로우모션·트림·루프**: 구간별 가변 재생속도(슬로우/패스트) + 출력 구간 트림 + GIF 루프 횟수(ADR 0013)
 - ✅ **크롭**: 피사체 bbox 중심 + 떨림 완화 + 종횡비 잠금(1:1/9:16/16:9)
 - ✅ **출력**: PNG/JPG · GIF(팔레트·크기예측·per-frame duration) · MP4(무음 — GIF가 주 목적)
@@ -68,7 +68,8 @@ ui  ──▶  app  ──▶  core  (Protocol/도메인 로직, 외부 라이�
 | 레이어 | 라이브러리 |
 |---|---|
 | UI | Python 3.10+ · PySide6 |
-| 세그멘테이션 | SAM 2.1 (transformers 5.9.0, `facebook/sam2.1-hiera-tiny`) |
+| 이미지 세그 | SAM 2.1 (transformers 5.10+, `facebook/sam2.1-hiera-tiny`, CPU) |
+| 비디오 추적 | **EdgeTAM** (transformers 5.10+, `yonigozlan/EdgeTAM-hf`, fp16, 13.5fps, ADR 0018) · SAM2(hiera-small) 폴백 |
 | 영상 디코드 | PyAV · Pillow |
 | 자동 검출·샷경계 재추적 (비디오, GPU 실검증 완료 — 단일샷 우수·멀티샷 컷별 선택) | Grounding DINO · PySceneDetect |
 | 업스케일 (이미지 모드 완료) | SwinIR (기본, Swin2SR) · Real-ESRGAN (옵션) |

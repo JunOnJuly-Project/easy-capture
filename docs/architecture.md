@@ -43,14 +43,15 @@
 | `core/source` | `FrameSource`·`FrameSpan`·`FrameMeta` Protocol — 이미지/영상 프레임 공급 추상 |
 | `core/tracking` | 갭 정책(gap_policy, 기본=BACKGROUND)·재매칭 점수(rematch\_score)·샷 분할(split\_into\_shots)·떨림완화(smooth\_boxes)·**컷별 오브젝트 명시 선택(cut\_selection: `CutSelection`·`index_selections_by_shot`·`validate_selections`, ADR 0006 보강)**. SAM2 video 구현체는 infra에 위치 |
 | `core/correction` | **(미구현·대체됨)** 자동 재매칭이 멀티샷에서 구조적 한계를 보여, 별도 부분 재추적 모듈 대신 **컷별 명시 선택(`core/tracking/cut_selection`)**으로 대체했다(ADR 0006 보강). 사용자가 각 컷의 추적 대상을 직접 지정 → 컷별 재추적 |
-| `core/crop` | centroid 산출, N-프레임 이동평균 떨림완화, 경계 클램프, 짝수 정렬, LANCZOS4 리사이즈, 종횡비 잠금. **마스크 정제(`mask_refine.largest_component`: 가장 큰 4-연결 성분만 남겨 인접 멤버 파편 제거, numpy 순수·scipy/cv2 비의존, ADR 0014)** |
+| `core/crop` | centroid 산출, N-프레임 이동평균 떨림완화, 경계 클램프, 짝수 정렬, LANCZOS4 리사이즈, 종횡비 잠금. 마스크 정제는 **box 프롬프트+negative point로 대체**(ADR 0015) — `mask_refine.largest_component`는 효과 한계로 추적 경로에서 철회·deprecated 보존(ADR 0014) |
 | `core/upscale` | `UpscaleBackend` Protocol(ADR 0009) + 순수 정규화 함수(`reconstruction_to_rgb_uint8`). SwinIR/Real-ESRGAN 구현체는 infra에 위치 |
-| `core/export` | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(yuv420p·오디오 mux), 갭 채우기 정책 적용 |
+| `core/export` | PNG/JPG, GIF(팔레트·디더·크기예측), MP4(yuv420p·무음 — 오디오 제외), 갭 채우기 정책 적용 |
 | `core/timing` | 구간별 가변 재생속도(슬로우/패스트) + 트림(출력 구간 제한) + GIF 루프 순수 로직 — **구현 완료**(`build_playback_schedule`·`schedule_to_cfr_indices`·`clamp_durations_for_gif`·`slice_for_trim`, numpy/stdlib만, ADR 0013) |
-| `infra/sam2_image_backend` | `Sam2ImageBackend` — `SegmentationBackend` 구현 (transformers 5.9.0 `Sam2Model`) |
-| `infra/sam2_video_backend` | `Sam2VideoBackend` — `VideoSegmentationBackend` 구현 (transformers 5.9.0 `Sam2VideoModel`) |
-| `infra/grounding_dino_backend` | `GroundingDinoBackend` — `DetectionBackend` 구현 (transformers 5.9.0) |
-| `infra/swin2sr_upscale_backend` | `Swin2srUpscaleBackend` — `UpscaleBackend` 구현 (transformers 5.9.0) |
+| `infra/sam2_image_backend` | `Sam2ImageBackend` — `SegmentationBackend` 구현 (transformers 5.10+ `Sam2Model`) |
+| `infra/sam2_video_backend` | `Sam2VideoBackend` — `VideoSegmentationBackend` 구현 (transformers 5.10+ `Sam2VideoModel`). 폴백/부모 |
+| `infra/edgetam_video_backend` | `EdgetamVideoBackend(Sam2VideoBackend)` — **비디오 추적 기본**(EdgeTAM, `EdgeTamVideoModel`, fp16 13.5fps, ADR 0018) |
+| `infra/grounding_dino_backend` | `GroundingDinoBackend` — `DetectionBackend` 구현 (transformers 5.10+) |
+| `infra/swin2sr_upscale_backend` | `Swin2srUpscaleBackend` — `UpscaleBackend` 구현 (transformers 5.10+) |
 | `infra/video_io` | PyAV 디코드(PTS·VFR 대응), ffprobe 메타, 구간 스트리밍. `FrameSource` Protocol 구현체 포함 |
 | `infra/model_registry` | 모델 다운로드 매니저(진행 콜백·재시도·캐시 검증), 티어 선택 |
 | `infra/device` | CUDA 감지, 모델 티어·해상도 자동 조정, 처리 예상시간 산출 |
@@ -77,13 +78,13 @@ class VideoSegmentationBackend(Protocol):
     # box 프롬프트(detect 전신 bbox→SAM2): add_click보다 정확한 전신 마스크(ADR 0014)
     # add_click은 무변경 유지(단일샷 폴백·무회귀)
     def propagate(self, session: object) -> list[np.ndarray]: ...
-    # 구현체: infra/sam2_video_backend (transformers 5.9.0 Sam2VideoModel)
+    # 구현체: infra/sam2_video_backend (transformers 5.10+ Sam2VideoModel)
 
 # core/segmentation/detection_backend.py  — 컷 경계 재검출, 무상태 (ADR 0012)
 class DetectionBackend(Protocol):
     device: str
     def detect(self, frame: np.ndarray, prompt: str) -> list[Detection]: ...
-    # 구현체: infra/grounding_dino_backend (transformers 5.9.0)
+    # 구현체: infra/grounding_dino_backend (transformers 5.10+)
 
 # core/upscale/backend.py  — 업스케일 공통 인터페이스 (ADR 0009)
 class UpscaleBackend(Protocol):

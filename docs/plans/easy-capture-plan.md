@@ -45,7 +45,8 @@ scope creep 방지를 위해 v1.0 경계를 명시한다. Out 항목도 **아키
 |---|---|
 | 언어 | Python 3.10+ |
 | GUI | PySide6 (LGPL) |
-| 세그+추적 | SAM 2.1 (`facebook/sam2.1-hiera-*`, Apache 2.0), **`transformers>=5.9.0` 단독** (별도 `sam2` 패키지 불필요 — ADR 0001 보완) |
+| 세그(이미지) | SAM 2.1 (`facebook/sam2.1-hiera-*`, Apache 2.0), **`transformers>=5.10` 단독** (별도 `sam2` 패키지 불필요 — ADR 0001 보완) |
+| 추적(비디오) | **EdgeTAM** (`yonigozlan/EdgeTAM-hf`, Apache 2.0, fp16, ADR 0018) — SAM2 video API 호환, SAM2 폴백 |
 | 클래스 검출 | Grounding DINO (`IDEA-Research/grounding-dino-tiny`, Apache 2.0) |
 | 샷 경계 감지 | PySceneDetect (BSD-3) |
 | 업스케일 | Real-ESRGAN(+basicsr) + SwinIR/Swin2SR (설정 선택) |
