@@ -15,6 +15,7 @@ from easy_capture.core.timing.timeremap import (
     SpeedSegment,
     normalize_segments,
 )
+from easy_capture.ui.time_format import frame_to_mm_ss
 
 # ---------------------------------------------------------------------------
 # 상수 — 매직넘버 금지
@@ -238,6 +239,7 @@ class SegmentTableWidget(QWidget):
         cap = dynamic_fast_cap(base_fps)
         for row in range(self.rowCount()):
             self._apply_fast_cap_to_row(row, cap)
+            self._refresh_row_mmss(row)
 
     def to_segments(self) -> tuple[SpeedSegment, ...]:
         """현재 테이블 전체 행 데이터를 SpeedSegment 튜플로 변환한다.
@@ -325,11 +327,31 @@ class SegmentTableWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _make_spinbox(self) -> QSpinBox:
-        """프레임 인덱스 입력용 SpinBox를 생성한다."""
+        """프레임 인덱스 입력용 SpinBox를 생성한다(값 옆 mm:ss 표시)."""
         spin = QSpinBox()
         spin.setMinimum(_SPINBOX_MIN)
         spin.setMaximum(_SPINBOX_MAX)
+        spin.valueChanged.connect(lambda _v, s=spin: self._update_mmss_suffix(s))
+        self._update_mmss_suffix(spin)  # 초기 suffix(base_fps 있으면)
         return spin
+
+    def _update_mmss_suffix(self, spin: QSpinBox) -> None:
+        """SpinBox 값 옆에 mm:ss를 suffix로 표시한다(base_fps 없으면 비움).
+
+        WHY: 프레임 번호만으로는 시간 감이 안 와 구간을 가늠하기 어렵다.
+             원본 fps 기준 mm:ss를 곁들여 타임라인 가독성을 높인다(time_format 재사용).
+        """
+        if self._base_fps and self._base_fps > 0:
+            spin.setSuffix(f"  {frame_to_mm_ss(spin.value(), self._base_fps)}")
+        else:
+            spin.setSuffix("")
+
+    def _refresh_row_mmss(self, row: int) -> None:
+        """행의 시작·끝 SpinBox mm:ss suffix를 갱신한다(base_fps 변경 시)."""
+        for col in (_COL_START, _COL_END):
+            spin = self._get_spinbox(row, col)
+            if spin is not None:
+                self._update_mmss_suffix(spin)
 
     def _make_speed_combo(self) -> QComboBox:
         """배속 프리셋 ComboBox를 생성한다.
