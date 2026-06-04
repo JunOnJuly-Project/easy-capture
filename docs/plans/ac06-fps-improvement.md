@@ -179,5 +179,6 @@
 fp16으로도 5.14fps라 목표 10fps 미달 → memory attention 경량화(EdgeTAM)로 추가 도약 측정(조사 §2-B). **인프라 준비 완료:**
 - **`infra/edgetam_video_backend.py`**: `EdgetamVideoBackend(Sam2VideoBackend)` — `_ensure_loaded`만 `EdgeTamVideoModel`로 override(EdgeTAM이 `Sam2VideoProcessor` 재사용·SAM2 video API 호환). dtype/autocast·init_session·add_box·propagate는 부모 계승 → fp16도 그대로 적용. 5 구조테스트.
 - **노트북**: 셀 1 `transformers>=5.10`(EdgeTAM 필요), 셀 8.6 EdgeTAM vs SAM2-small fp16 비교(fps·AC-01·needs_correction + box/negative 지원 확인 + 실패 시 원인 안내).
-- **측정 검증 포인트**(Colab): ① EdgeTAM이 box+negative 지원하는가(track 성공 여부) ② fps가 SAM2-small fp16(≈5fps) 대비 향상되어 10fps 근접하는가 ③ 군무 AC-01 100%·needs_correction 0 유지하는가.
-- **다음 결정**: 3개 모두 통과 → `router`/`device.py`에 EdgeTAM 채택(새 ADR). 정확도 미달 → SAM2 유지 + 다른 레버(torch.compile 등).
+- **측정 결과**(Colab T4, 2026-06-04): **EdgeTAM fp16 = 13.5 fps**(SAM2-small fp16 5.1의 2.6×, **AC-01 100%·needs_correction 0 유지**, box+negative track 성공). 3개 기준 전부 통과 → **🎯 AC-06 10fps 목표 달성**.
+- ✅ **채택 완료**([ADR 0018](../adr/0018-edgetam-video-backend.md)): `device.py VIDEO_TRACKING_REPO="yonigozlan/EdgeTAM-hf"`, `router`가 `EdgetamVideoBackend` 조립, `transformers>=5.10` 핀 상향. SAM2 백엔드는 폴백/부모로 유지.
+- ⚠ repo 주의: 공식 문서의 `yonigozlan/edgetam-video-1`은 gated/미존재(401) → public `yonigozlan/EdgeTAM-hf` 사용.
