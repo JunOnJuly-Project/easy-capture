@@ -171,8 +171,13 @@
 - `device.py`: `SAM2_DTYPE_BY_DEVICE`(cuda=fp16/cpu=fp32) + `select_sam2_dtype`. `router`가 백엔드 생성 시 주입. 3 단위테스트.
 - **결과**: 데스크톱 비디오 추적 기본 cuda 경로가 fp16(2.67×)로 동작. cpu 무회귀(fp32).
 
-### 다음
-- **EdgeTAM(B) PoC**: fp16으로도 5.14fps라 목표 10fps 미달 → memory attention 경량화(EdgeTAM)로 추가 도약 측정(조사 §2-B·§5). fp16과 결합.
-
 ### 적용 (완료) — device.py 카탈로그 정합화
 - ✅ cuda 기본 모델을 `base-plus`→`hiera-small`로 변경(게이트·fp16 측정이 small로 통과). 데스크톱 cuda 경로가 검증된 small + fp16으로 동작.
+
+### EdgeTAM(B) PoC — 측정 인프라 완료, Colab 측정 대기
+
+fp16으로도 5.14fps라 목표 10fps 미달 → memory attention 경량화(EdgeTAM)로 추가 도약 측정(조사 §2-B). **인프라 준비 완료:**
+- **`infra/edgetam_video_backend.py`**: `EdgetamVideoBackend(Sam2VideoBackend)` — `_ensure_loaded`만 `EdgeTamVideoModel`로 override(EdgeTAM이 `Sam2VideoProcessor` 재사용·SAM2 video API 호환). dtype/autocast·init_session·add_box·propagate는 부모 계승 → fp16도 그대로 적용. 5 구조테스트.
+- **노트북**: 셀 1 `transformers>=5.10`(EdgeTAM 필요), 셀 8.6 EdgeTAM vs SAM2-small fp16 비교(fps·AC-01·needs_correction + box/negative 지원 확인 + 실패 시 원인 안내).
+- **측정 검증 포인트**(Colab): ① EdgeTAM이 box+negative 지원하는가(track 성공 여부) ② fps가 SAM2-small fp16(≈5fps) 대비 향상되어 10fps 근접하는가 ③ 군무 AC-01 100%·needs_correction 0 유지하는가.
+- **다음 결정**: 3개 모두 통과 → `router`/`device.py`에 EdgeTAM 채택(새 ADR). 정확도 미달 → SAM2 유지 + 다른 레버(torch.compile 등).
