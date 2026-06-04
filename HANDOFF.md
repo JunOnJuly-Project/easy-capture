@@ -125,7 +125,7 @@ python -m easy_capture        # 모드 선택 → 이미지 선택
 3. ✅ **노트북 SAM2_REPO small 기본화**: 게이트가 small 전제이므로 노트북 기본 모델을 `hiera-small`로 변경 완료. Colab `app_verify`(셀 6) tiny→small, OOM 폴백 안내 정합화. Kaggle은 이미 small이라 OOM 안내만 정합. PoC 노트북(`gpu_poc`)은 historical이라 유지.
 4. **이미지 모드 GUI 수동 스모크**(선택): `python -m easy_capture` → 이미지 → 클릭 → 저장 (실모델 코드 스모크는 완료)
 5. **후속(v1.1 기능)**: 🔬 진행 중 —
-   - 🟡 **업스케일 결합**: app 핵심 완료(`video_capture.export(upscaler=)` — 이미지 모드 대칭, crop 후 동일 배율 확대, 무회귀 None, 2테스트). **남은 것**: video_window UI 토글+`_ExportWorker` upscaler 전달(GPU 필수라 우선순위 낮음).
+   - 🟡 **업스케일 결합**: app 핵심 완료(`video_capture.export(upscaler=)` — 이미지 모드 대칭, crop 후 동일 배율 확대, 무회귀 None, 2테스트). **결정(2026-06-04): 백로그 유지** — 공개 API는 이미지 모드 대칭·테스트로 보호(죽은 코드 아님, reviewer 확인). **남은 것(다음 세션)**: video_window 업스케일 토글+배율 콤보+`_ExportWorker` upscaler 전달+router video upscaler_factory(GPU 필수, Colab 검증).
    - 🟢 **타임라인 mm:ss**: `ui/time_format`(frame↔mm:ss 순수 변환, 17테스트) + `segment_table` 시작/끝 SpinBox에 mm:ss suffix 표시(set_base_fps 연동, 4 offscreen 테스트). **남은 것**: video_window 구간/트림 SpinBox에도 적용(같은 함수 재사용) + 시각 타임라인(QGraphics, 후순위).
    - ❌ **오디오 동기 — 제외 결정**(2026-06-04): GIF가 최종 목적이라 오디오 불필요. MP4도 무음 유지. README·계획서 "오디오 포함/패스through" 표기를 "무음"으로 정정 완료(ADR 0011 무음 기준 유지).
    - ⏳ **RIFE 보간**: 부드러운 슬로우(GIF 슬로우 품질 향상). GPU PoC 선행, 가장 큼.
