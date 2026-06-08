@@ -15,7 +15,7 @@ from easy_capture.core.timing.timeremap import (
     SpeedSegment,
     normalize_segments,
 )
-from easy_capture.ui.time_format import frame_to_mm_ss
+from easy_capture.ui.time_format import mmss_suffix
 
 # ---------------------------------------------------------------------------
 # 상수 — 매직넘버 금지
@@ -341,10 +341,7 @@ class SegmentTableWidget(QWidget):
         WHY: 프레임 번호만으로는 시간 감이 안 와 구간을 가늠하기 어렵다.
              원본 fps 기준 mm:ss를 곁들여 타임라인 가독성을 높인다(time_format 재사용).
         """
-        if self._base_fps and self._base_fps > 0:
-            spin.setSuffix(f"  {frame_to_mm_ss(spin.value(), self._base_fps)}")
-        else:
-            spin.setSuffix("")
+        spin.setSuffix(mmss_suffix(spin.value(), self._base_fps))
 
     def _refresh_row_mmss(self, row: int) -> None:
         """행의 시작·끝 SpinBox mm:ss suffix를 갱신한다(base_fps 변경 시)."""

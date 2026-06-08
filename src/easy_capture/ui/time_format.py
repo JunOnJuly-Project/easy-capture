@@ -27,6 +27,24 @@ def frame_to_mm_ss(frame_index: int, fps: float) -> str:
     return f"{total_sec // _SEC_PER_MIN:02d}:{total_sec % _SEC_PER_MIN:02d}"
 
 
+def mmss_suffix(frame_index: int, fps: float | None) -> str:
+    """SpinBox 등에 붙일 "  mm:ss" suffix 문자열을 만든다(fps 없으면 빈 문자열).
+
+    Args:
+        frame_index: 0-기반 프레임 인덱스.
+        fps: 초당 프레임 수(None·0 이하면 표시 생략).
+
+    Returns:
+        "  mm:ss"(앞 공백 2칸) 또는 fps 미설정 시 "".
+
+    WHY: 프레임 번호 옆 시간 표시(가독성)를 segment_table·video_window가 공유한다(DRY).
+         Qt 비의존 — 순수 문자열 생성만 담당한다.
+    """
+    if fps and fps > 0:
+        return f"  {frame_to_mm_ss(frame_index, fps)}"
+    return ""
+
+
 def mm_ss_to_frame(text: str, fps: float) -> int:
     """"mm:ss"(또는 "ss") 문자열을 프레임 인덱스로 변환한다(반올림).
 

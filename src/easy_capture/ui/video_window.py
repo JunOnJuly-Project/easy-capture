@@ -54,6 +54,7 @@ from easy_capture.ui.sizing import (
     MIN_CROP_RATIO,
     crop_ratio_to_size,
 )
+from easy_capture.ui.time_format import mmss_suffix
 
 # 종횡비 콤보 항목
 _ASPECT_FREE_LABEL = "자유"
@@ -273,6 +274,8 @@ class VideoMainWindow(QMainWindow):
         self._size_ratio: int = DEFAULT_CROP_RATIO
         self._smooth_window: int = _DEFAULT_SMOOTH
         self._total_frames: int = 0
+        # 원본 영상 fps — 구간/트림 SpinBox mm:ss suffix 계산용(None이면 표시 생략)
+        self._base_fps: float | None = None
         # 리뷰 [제안]: __init__에서 None으로 선언해 hasattr 대신 is not None 검사
         self._pending_point: tuple[int, int] | None = None
         # shot_detect 배선용 — 파일 경로·구간 보관([중요] 2 수정)
@@ -374,6 +377,7 @@ class VideoMainWindow(QMainWindow):
         self._span_start.setValue(0)
         self._span_start.setEnabled(False)
         self._span_start.valueChanged.connect(self._on_span_changed)
+        self._connect_mmss(self._span_start)
         tb.addWidget(self._span_start)
 
         tb.addWidget(QLabel(" 끝:"))
@@ -382,6 +386,7 @@ class VideoMainWindow(QMainWindow):
         self._span_end.setValue(_DEFAULT_SPAN_END)
         self._span_end.setEnabled(False)
         self._span_end.valueChanged.connect(self._on_span_changed)
+        self._connect_mmss(self._span_end)
         tb.addWidget(self._span_end)
 
     def _build_aspect_combo(self, tb: QToolBar) -> None:
@@ -466,6 +471,7 @@ class VideoMainWindow(QMainWindow):
         self._trim_start_spin.setMaximum(_TRIM_SPINBOX_DEFAULT_MAX)
         self._trim_start_spin.setPrefix("S:")
         self._trim_start_spin.setEnabled(False)
+        self._connect_mmss(self._trim_start_spin)
         tb.addWidget(self._trim_start_spin)
 
         self._trim_end_spin = QSpinBox()
@@ -473,6 +479,7 @@ class VideoMainWindow(QMainWindow):
         self._trim_end_spin.setMaximum(_TRIM_SPINBOX_DEFAULT_MAX)
         self._trim_end_spin.setPrefix("E:")
         self._trim_end_spin.setEnabled(False)
+        self._connect_mmss(self._trim_end_spin)
         tb.addWidget(self._trim_end_spin)
 
         self._trim_frame_to_start_btn = QPushButton("프레임→트림시작")
@@ -603,6 +610,8 @@ class VideoMainWindow(QMainWindow):
         if meta.fps and meta.fps > 0:
             self._fps_spin.setValue(round(meta.fps))
             self._segment_table.set_base_fps(meta.fps)
+            self._base_fps = meta.fps
+            self._refresh_all_mmss()
 
     def _on_span_changed(self) -> None:
         """구간 변경 시 첫 프레임 미리보기와 트림 SpinBox 상한을 갱신한다.
@@ -1223,6 +1232,30 @@ class VideoMainWindow(QMainWindow):
                 f"{n_clamped}개 프레임의 표시 시간이 너무 짧아 20ms로 조정됩니다.\n"
                 "GIF 뷰어 호환성을 위한 자동 처리입니다.",
             )
+
+    def _connect_mmss(self, spin: QSpinBox) -> None:
+        """SpinBox 값 변경 시 mm:ss suffix가 갱신되도록 연결한다(초기 1회 적용).
+
+        WHY: 구간(절대 프레임)·트림(구간 상대 프레임) SpinBox 옆에 원본 fps 기준
+             시간을 곁들여 가독성을 높인다. segment_table과 동일 패턴(time_format
+             mmss_suffix 공유, DRY). default 인자로 spin을 캡처해 늦은 바인딩을 피한다.
+        """
+        spin.valueChanged.connect(lambda _v, s=spin: self._update_spin_mmss(s))
+        self._update_spin_mmss(spin)
+
+    def _update_spin_mmss(self, spin: QSpinBox) -> None:
+        """SpinBox 값 옆 mm:ss suffix를 현재 base_fps로 갱신한다(없으면 빈 문자열)."""
+        spin.setSuffix(mmss_suffix(spin.value(), self._base_fps))
+
+    def _refresh_all_mmss(self) -> None:
+        """구간·트림 SpinBox의 mm:ss suffix를 일괄 갱신한다(base_fps 변경 시)."""
+        for spin in (
+            self._span_start,
+            self._span_end,
+            self._trim_start_spin,
+            self._trim_end_spin,
+        ):
+            self._update_spin_mmss(spin)
 
     def _set_status(self, message: str) -> None:
         """상태 바 메시지를 업데이트한다."""
