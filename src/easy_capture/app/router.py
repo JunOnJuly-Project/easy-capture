@@ -65,13 +65,22 @@ class AppRouter:
         WHY: composition root — Sam2VideoBackend와 open_source를 조립해
              VideoCaptureUseCase 팩토리를 VideoMainWindow에 주입한다.
              이미지 모드 _launch_image_mode와 동형(DRY 구조 계승).
+        WHY 업스케일: 이미지 모드와 동일하게 upscaler_factory·UPSCALE_MODELS를
+             주입한다. 비디오 export는 crop 직후 동일 배율로 각 프레임을 확대한다
+             (video_capture.export(upscaler=) 대칭). 업스케일은 GPU Swin2SR이라
+             실사용 GPU 전제이며, 이미지 모드와 같은 팩토리를 재사용한다(DRY).
         """
-        from easy_capture.infra.device import detect_device
+        from easy_capture.infra.device import UPSCALE_MODELS, detect_device
         from easy_capture.ui.video_window import VideoMainWindow
 
         device = detect_device()
         usecase_factory = self._build_video_usecase_factory(device)
-        self._main_window = VideoMainWindow(usecase_factory)
+        upscaler_factory = self._build_upscaler_factory(device)
+        self._main_window = VideoMainWindow(
+            usecase_factory,
+            upscaler_factory=upscaler_factory,
+            upscale_catalog=UPSCALE_MODELS,
+        )
         self._main_window.show()
         if self._mode_window:
             self._mode_window.close()

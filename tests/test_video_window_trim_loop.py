@@ -530,7 +530,7 @@ class TestOnExportConfigInjection:
         # _ExportWorker 생성 가로채기 — config를 캡처하고 실제 워커는 생성 안 함
         original_init = vw._ExportWorker.__init__
 
-        def _fake_init(self_w, usecase, frames, boxes, target, result):
+        def _fake_init(self_w, usecase, frames, boxes, target, result, upscaler=None):
             _, cfg = target
             captured.append(cfg)
             # 워커 동작 없이 종료 상태로만 초기화

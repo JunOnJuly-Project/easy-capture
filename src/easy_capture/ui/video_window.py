@@ -222,17 +222,18 @@ class _ExportWorker(QThread):
     done = Signal(str)   # 저장 완료 경로
     error = Signal(str)  # 한국어 오류 메시지
 
-    def __init__(self, usecase, frames, boxes, target, result) -> None:
+    def __init__(self, usecase, frames, boxes, target, result, upscaler=None) -> None:
         super().__init__()
-        # WHY: 인자를 튜플로 묶어 매개변수 3개 규칙 완화 — 생성자 계약
-        self._args = (usecase, frames, boxes, target, result)
+        # WHY: 인자를 튜플로 묶어 매개변수 3개 규칙 완화 — 생성자 계약.
+        #      upscaler는 기본 None으로 기존 4+1 인자 호출을 깨지 않는다(무회귀).
+        self._args = (usecase, frames, boxes, target, result, upscaler)
 
     def run(self) -> None:
-        """워커 스레드에서 export를 실행한다."""
-        usecase, frames, boxes, target, result = self._args
+        """워커 스레드에서 export(upscaler=...)를 실행한다."""
+        usecase, frames, boxes, target, result, upscaler = self._args
         path, _ = target
         try:
-            usecase.export(frames, boxes, target, result=result)
+            usecase.export(frames, boxes, target, result=result, upscaler=upscaler)
             self.done.emit(path)
         except Exception as exc:  # noqa: BLE001
             self.error.emit(f"저장 오류: {exc}")
@@ -246,11 +247,22 @@ class VideoMainWindow(QMainWindow):
          팩토리 패턴으로 usecase 생성을 지연한다(이미지 모드 동형).
     """
 
-    def __init__(self, usecase_factory) -> None:
+    def __init__(
+        self,
+        usecase_factory,
+        upscaler_factory=None,
+        upscale_catalog=(),
+    ) -> None:
         super().__init__()
         self.setWindowTitle("easy-capture — 비디오 모드")
         self.resize(900, 640)
         self._usecase_factory = usecase_factory
+
+        # 업스케일 팩토리·카탈로그 주입(DIP) — None이면 업스케일 UI 비활성.
+        # WHY: 이미지 모드 ImageMainWindow와 동형. video_window는 transformers/torch를
+        #      직접 import하지 않고 router(composition root)가 백엔드 생성을 책임진다.
+        self._upscaler_factory = upscaler_factory
+        self._upscale_catalog = upscale_catalog
 
         # 상태 필드
         self._usecase = None
@@ -281,6 +293,12 @@ class VideoMainWindow(QMainWindow):
         # 트림 활성 여부 — export 시 TrimRange 생성 여부를 결정
         self._trim_enabled: bool = False
 
+        # 업스케일 상태 — 이미지 모드 ImageMainWindow와 동형(체크·모델·백엔드 캐시)
+        self._upscale_on: bool = False
+        self._upscale_model = None             # 선택된 UpscaleModel (None=미선택)
+        self._cached_upscaler = None           # 마지막 생성 백엔드 1개 캐시
+        self._cached_repo: str | None = None   # 캐시 유효성 판단용
+
         self._build_toolbar()
         self._build_canvas_with_segment_panel()
         self._build_statusbar()
@@ -308,6 +326,34 @@ class VideoMainWindow(QMainWindow):
         self._build_loop_controls(tb)
         self._build_detect_button(tb)
         self._build_track_save_buttons(tb)
+        self._build_upscale_controls(tb)
+
+    def _build_upscale_controls(self, tb: QToolBar) -> None:
+        """업스케일 체크박스·배율 콤보박스를 툴바에 추가한다(이미지 모드 동형).
+
+        WHY: 카탈로그(UPSCALE_MODELS)가 단일 소스로 콤보 항목을 만든다(DRY).
+             팩토리가 없으면(개발/테스트 환경) 위젯을 추가하지 않는다 — 이미지
+             모드 _build_upscale_controls와 동일한 가드.
+        """
+        if not self._upscaler_factory:
+            return
+        tb.addWidget(QLabel("  업스케일:"))
+        self._upscale_check = QCheckBox("업스케일")
+        self._upscale_check.setChecked(False)
+        self._upscale_check.setEnabled(False)
+        self._upscale_check.stateChanged.connect(self._on_upscale_toggled)
+        tb.addWidget(self._upscale_check)
+
+        self._upscale_combo = QComboBox()
+        for model in self._upscale_catalog:
+            self._upscale_combo.addItem(model.label)
+        self._upscale_combo.setEnabled(False)
+        self._upscale_combo.currentIndexChanged.connect(self._on_upscale_model_changed)
+        tb.addWidget(self._upscale_combo)
+
+        # 초기 모델 선택 동기화(콤보 첫 항목)
+        if self._upscale_catalog:
+            self._upscale_model = self._upscale_catalog[0]
 
     def _build_detect_button(self, tb: QToolBar) -> None:
         """컷 감지 버튼을 툴바에 추가한다(샷별 후보 검출 → 컷 선택 모드).
@@ -679,6 +725,9 @@ class VideoMainWindow(QMainWindow):
         self._gap_combo.setEnabled(True)
         self._loop_spin.setEnabled(True)
         self._save_btn.setEnabled(True)
+        # 업스케일 위젯은 팩토리 주입 시에만 존재 — 추적 완료 후 활성화
+        if hasattr(self, "_upscale_check"):
+            self._upscale_check.setEnabled(True)
 
         status = _build_track_status(result)
         self._set_status(status)
@@ -859,6 +908,46 @@ class VideoMainWindow(QMainWindow):
         span_len = self._span_end.value() - self._span_start.value()
         self._trim_end_spin.setValue(max(span_len, 0))
 
+    def _on_upscale_toggled(self, state: int) -> None:
+        """업스케일 체크박스 상태 변경 시 콤보 활성/비활성 토글(이미지 모드 동형)."""
+        self._upscale_on = bool(state)
+        if hasattr(self, "_upscale_combo"):
+            self._upscale_combo.setEnabled(self._upscale_on)
+
+    def _on_upscale_model_changed(self, index: int) -> None:
+        """배율 콤보 변경 시 선택 모델 갱신 및 백엔드 캐시 무효화.
+
+        WHY: repo가 바뀌면 이전 백엔드 캐시를 버려 재선택 시 새 모델을 로드한다
+             (이미지 모드 _on_upscale_model_changed와 동일 캐시 정책).
+        """
+        if self._upscale_catalog and 0 <= index < len(self._upscale_catalog):
+            model = self._upscale_catalog[index]
+            if self._upscale_model != model:
+                self._upscale_model = model
+                self._cached_upscaler = None
+                self._cached_repo = None
+
+    def _get_or_make_upscaler(self, model):
+        """캐시된 백엔드 반환 또는 팩토리로 새 백엔드를 생성한다(이미지 모드 동형).
+
+        WHY: 같은 repo 연속 저장 시 재로드를 방지하는 단일 백엔드 캐시.
+             repo가 바뀌면 캐시를 무효화해 새 모델을 로드한다.
+        """
+        if self._cached_upscaler is None or self._cached_repo != model.repo:
+            self._cached_upscaler = self._upscaler_factory(model)
+            self._cached_repo = model.repo
+        return self._cached_upscaler
+
+    def _resolve_upscaler(self):
+        """현재 업스케일 토글·모델로 export에 넘길 업스케일러를 결정한다.
+
+        WHY: 토글 해제·모델 미선택이면 None을 반환해 기존 무회귀 경로(업스케일
+             없음)를 탄다. export 슬롯이 20줄을 넘지 않도록 분리한다.
+        """
+        if not self._upscale_on or self._upscale_model is None:
+            return None
+        return self._get_or_make_upscaler(self._upscale_model)
+
     def _on_aspect_changed(self, index: int) -> None:
         """종횡비 변경 시 박스 즉시 재계산(재추적 없음)."""
         _, key = _ASPECT_ITEMS[index]
@@ -909,14 +998,17 @@ class VideoMainWindow(QMainWindow):
 
         self._warn_export_issues(fmt, fps, segments, trim, loop_count)
 
+        upscaler = self._resolve_upscaler()
         self._save_btn.setEnabled(False)
-        self._set_status("저장 중…")
+        status = "업스케일·저장 중…" if upscaler is not None else "저장 중…"
+        self._set_status(status)
         self._export_worker = _ExportWorker(
             self._usecase,
             self._frames,
             self._boxes,
             (path, config),
             self._track_result,  # gap_policy용 TrackResult 전달
+            upscaler,            # 업스케일 토글 해제 시 None(무회귀)
         )
         self._export_worker.done.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
